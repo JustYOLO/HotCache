@@ -1,0 +1,2 @@
+[Memtable: 2] # RocksDB Default
+fillrandom   :     140.236 micros/op 114085 ops/sec 1470.586 seconds 167772160 operations;   12.6 MB/s

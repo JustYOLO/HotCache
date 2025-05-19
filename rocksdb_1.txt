@@ -1,0 +1,22 @@
+[1MiB_Cache]
+readseq      :       1.942 micros/op 4108730 ops/sec 816.662 seconds 3355443200 operations;  356.6 MB/s
+[64MiB_Cache]
+readseq      :       1.349 micros/op 5929513 ops/sec 565.888 seconds 3355443200 operations;  514.6 MB/s
+[128MiB_Cache]
+readseq      :       1.254 micros/op 6380082 ops/sec 525.925 seconds 3355443200 operations;  553.7 MB/s
+[512MiB_Cache]
+readseq      :       0.960 micros/op 8331869 ops/sec 402.724 seconds 3355443200 operations;  723.1 MB/s
+[1GiB_Cache]
+readseq      :       0.838 micros/op 9541423 ops/sec 351.671 seconds 3355443200 operations;  828.0 MB/s
+[1MiB_Cache]
+readseq      :       0.980 micros/op 8152828 ops/sec 411.568 seconds 3355443200 operations;  707.5 MB/s
+[64MiB_Cache]
+readseq      :       0.832 micros/op 9619435 ops/sec 348.819 seconds 3355443200 operations;  834.8 MB/s
+[128MiB_Cache]
+readseq      :       0.834 micros/op 9594433 ops/sec 349.728 seconds 3355443200 operations;  832.6 MB/s
+[512MiB_Cache]
+readseq      :       0.847 micros/op 9442769 ops/sec 355.345 seconds 3355443200 operations;  819.5 MB/s
+[1GiB_Cache]
+readseq      :       0.830 micros/op 9633095 ops/sec 348.324 seconds 3355443200 operations;  836.0 MB/s
+[5GiB_Cache]
+readseq      :       0.833 micros/op 9600152 ops/sec 349.520 seconds 3355443200 operations;  833.1 MB/s

@@ -1,0 +1,8 @@
+[Memtable: 4]
+fillrandom   :     140.479 micros/op 113887 ops/sec 1473.138 seconds 167772160 operations;   12.6 MB/s
+[Memtable: 8]
+fillrandom   :     140.145 micros/op 114160 ops/sec 1469.618 seconds 167772160 operations;   12.6 MB/s
+[Memtable: 16]
+fillrandom   :     140.250 micros/op 114073 ops/sec 1470.735 seconds 167772160 operations;   12.6 MB/s
+[Memtable: 32]
+fillrandom   :     139.957 micros/op 114311 ops/sec 1467.673 seconds 167772160 operations;   12.6 MB/s
