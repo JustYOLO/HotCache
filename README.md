@@ -1,3 +1,5 @@
+## I'm not the owner of this repo/code. The original repository is here: https://github.com/facebook/rocksdb
+
 ## RocksDB: A Persistent Key-Value Store for Flash and RAM Storage
 
 [![CircleCI Status](https://circleci.com/gh/facebook/rocksdb.svg?style=svg)](https://circleci.com/gh/facebook/rocksdb)
