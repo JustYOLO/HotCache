@@ -1,6 +1,8 @@
 make_config.mk
 rocksdb.pc
 
+db_bench
+
 *.a
 *.arc
 *.d

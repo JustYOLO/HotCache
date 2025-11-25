@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cinttypes>
+#include <cstdint>
 #include <deque>
 #include <string>
 #include <unordered_set>
@@ -493,6 +494,7 @@ class CompactionIterator {
   // is in or beyond the last file checked during the previous call
   std::vector<size_t> level_ptrs_;
   CompactionIterationStats iter_stats_;
+  uint64_t current_user_key_count_ = 0;
 
   // Used to avoid purging uncommitted values. The application can specify
   // uncommitted values by providing a SnapshotChecker object.

@@ -7,6 +7,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
+#include <gflags/gflags.h>
+#include <cstdint>
 #ifdef GFLAGS
 #ifdef NUMA
 #include <numa.h>
@@ -114,6 +116,7 @@ DEFINE_string(
     "fillsync,"
     "fillrandom,"
     "filluniquerandomdeterministic,"
+    "useCustom,"
     "overwrite,"
     "readrandom,"
     "newiterator,"
@@ -166,7 +169,8 @@ DEFINE_string(
     "ycsbwkldd,"
     "ycsbwklde,"
     "ycsbwkldf,"
-    "ycsbwlkdw,"
+    "ycsbwkldw,"
+    "fillzip,"
     "testlatestgenerator,"
     "approximatememtablestats",
 
@@ -366,6 +370,24 @@ DEFINE_int32(user_timestamp_size, 0,
 
 DEFINE_int32(num_multi_db, 0,
              "Number of DBs used in the benchmark. 0 means single DB.");
+
+DEFINE_double(zipf_const, 0.99,
+              "Zipfian constant for Zipf distribution");
+
+DEFINE_int64(key_range, 10000000, "zipf key range");
+struct BenchmarkParams {
+  double zipf_const;
+  int64_t key_range;
+  bool memDist;
+  // you can add more benchmark‐only flags here in future
+};
+
+static BenchmarkParams bench_params;
+
+DEFINE_bool(set_memtable_key_appearance_distribution,
+            false,
+            "LYM custom option. If true, outputs memtable key appearance"
+            "distribution data");
 
 DEFINE_double(compression_ratio, 0.5,
               "Arrange to generate values that shrink to this fraction of "
@@ -3474,6 +3496,7 @@ class Benchmark {
     std::stringstream benchmark_stream(FLAGS_benchmarks);
     std::string name;
     std::unique_ptr<ExpiredTimeFilter> filter;
+    // Lee: db_bench param init
     while (std::getline(benchmark_stream, name, ',')) {
       // Sanitize parameters
       num_ = FLAGS_num;
@@ -3647,22 +3670,28 @@ class Benchmark {
         method = &Benchmark::IteratorCreation;
       } else if (name == "testzipf") {
         method = &Benchmark::Zipf;
-      }else if (name == "testlatestgenerator") {
+      } else if (name == "testlatestgenerator") {
         method = &Benchmark::LatestGenerator;
-      }else if (name == "ycsbwklda") {
+      } else if (name == "ycsbwklda") {
         method = &Benchmark::YCSBWorkloadA;
-      }else if (name == "ycsbwkldb") {
+      } else if(name == "useCustom") {
+        method = &Benchmark::UseCustom;
+      } else if (name == "ycsbwkldb") {
         method = &Benchmark::YCSBWorkloadB;
-      }else if (name == "ycsbwkldc") {
+      } else if (name == "ycsbwkldc") {
         method = &Benchmark::YCSBWorkloadC;
-      }else if (name == "ycsbwkldd") {
+      } else if (name == "ycsbwkldd") {
         method = &Benchmark::YCSBWorkloadD;
-      }else if (name == "ycsbwklde") {
+      } else if (name == "ycsbwklde") {
         method = &Benchmark::YCSBWorkloadE;
-      }else if (name == "ycsbwkldf") {
+      } else if (name == "ycsbwkldf") {
         method = &Benchmark::YCSBWorkloadF;
-      } else if (name == "ycsbwkldw") {
+      } else if (name == "fillzip") {
         method = &Benchmark::YCSBWorkloadW;
+      } else if (name == "fillstep") {
+        method = &Benchmark::FillStep;
+      } else if (name == "onekeyw") {
+        method = &Benchmark::OneKeyWrite;
       } else if (name == "newiteratorwhilewriting") {
         num_threads++;  // Add extra thread for writing
         method = &Benchmark::IteratorCreationWhileWriting;
@@ -6851,6 +6880,43 @@ class Benchmark {
       BGWriter(thread, kWrite);
     }
   }
+  void UseCustom(ThreadState* thread) {
+    ReadOptions options(FLAGS_verify_checksum, true);
+    RandomGenerator gen;
+    std::string value;
+    int64_t found = 0;
+
+    int64_t reads_done = 0;
+    int64_t writes_done = 0;
+    Duration duration(FLAGS_duration, 0);
+
+    std::unique_ptr<const char[]> key_guard;
+    Slice key = AllocateKey(&key_guard);
+
+    // the number of iterations is the larger of read_ or write_
+
+    //write in order
+    for (long k = 1; k <= FLAGS_num; k++){
+      DB* db = SelectDB(thread);
+      GenerateKeyFromInt(k, FLAGS_num, &key);
+
+        //write
+        Status s = db->Put(write_options_, key, gen.Generate(value_size_));
+        if (!s.ok()) {
+          //fprintf(stderr, "put error: %s\n", s.ToString().c_str());
+          //exit(1);
+        }
+        writes_done++;
+        //printf("K= %d\n", k);
+        thread->stats.FinishedOps(nullptr, db, 1, kWrite);
+    }    
+      
+    char msg[100];
+    snprintf(msg, sizeof(msg), "( reads:%" PRIu64 " writes:%" PRIu64 \
+             " total:%" PRIu64 " found:%" PRIu64 ")",
+             reads_done, writes_done, readwrites_, found);
+    thread->stats.AddMessage(msg);
+  }
 
   void YCSBFillDB(ThreadState* thread) {
     ReadOptions options(FLAGS_verify_checksum, true);
@@ -6890,7 +6956,7 @@ class Benchmark {
     thread->stats.AddMessage(msg);
   }
 
-   // Workload A: Update heavy workload
+  // Workload A: Update heavy workload
   // This workload has a mix of 50/50 reads and writes. 
   // An application example is a session store recording recent actions.
   // Read/update ratio: 50/50
@@ -6900,7 +6966,7 @@ class Benchmark {
     ReadOptions options(FLAGS_verify_checksum, true);
     RandomGenerator gen;
     init_latestgen(FLAGS_num);
-    init_zipf_generator(0, FLAGS_num);
+    init_zipf_generator(0, FLAGS_num, bench_params.zipf_const);
     
     std::string value;
     int64_t found = 0;
@@ -6991,7 +7057,7 @@ class Benchmark {
     ReadOptions options(FLAGS_verify_checksum, true);
     RandomGenerator gen;
     init_latestgen(FLAGS_num);
-    init_zipf_generator(0, FLAGS_num);
+    init_zipf_generator(0, FLAGS_num, bench_params.zipf_const);
 
     std::string value;
     int64_t found = 0;
@@ -7065,7 +7131,7 @@ class Benchmark {
     ReadOptions options(FLAGS_verify_checksum, true);
     RandomGenerator gen;
     init_latestgen(FLAGS_num);
-    init_zipf_generator(0, FLAGS_num);
+    init_zipf_generator(0, FLAGS_num, bench_params.zipf_const);
 
     std::string value;
     int64_t found = 0;
@@ -7134,7 +7200,7 @@ class Benchmark {
     ReadOptions options(FLAGS_verify_checksum, true);
     RandomGenerator gen;
     init_latestgen(FLAGS_num);
-    init_zipf_generator(0, FLAGS_num);
+    init_zipf_generator(0, FLAGS_num, bench_params.zipf_const);
 
     std::string value;
     int64_t found = 0;
@@ -7221,7 +7287,7 @@ class Benchmark {
     ReadOptions options(FLAGS_verify_checksum, true);
     RandomGenerator gen;
     init_latestgen(FLAGS_num);
-    init_zipf_generator(0, FLAGS_num);
+    init_zipf_generator(0, FLAGS_num, bench_params.zipf_const);
     
     std::string value;
     int64_t found = 0;
@@ -7310,7 +7376,7 @@ class Benchmark {
     ReadOptions options(FLAGS_verify_checksum, true);
     RandomGenerator gen;
     init_latestgen(FLAGS_num);
-    init_zipf_generator(0, FLAGS_num);
+    init_zipf_generator(0, FLAGS_num, bench_params.zipf_const);
 
     std::string value;
     int64_t found = 0;
@@ -7322,7 +7388,6 @@ class Benchmark {
 
     std::unique_ptr<const char[]> key_guard;
     Slice key = AllocateKey(&key_guard);
-
 
     // the number of iterations is the larger of read_ or write_
     while (nums > 0) {
@@ -7377,8 +7442,7 @@ class Benchmark {
   void YCSBWorkloadW(ThreadState* thread) {
     ReadOptions options(FLAGS_verify_checksum, true);
     RandomGenerator gen;
-    init_latestgen(FLAGS_num);
-    init_zipf_generator(0, FLAGS_num);
+    init_zipf_generator(0, FLAGS_key_range, bench_params.zipf_const);
       
     std::string value;
     int64_t writes_done = 0;
@@ -7405,9 +7469,9 @@ class Benchmark {
         k = thread->rand.Next() % FLAGS_num;
       } else {
         // zipf 분포에서 번호 생성
-        k = nextValue() % FLAGS_num;            
+        k = nextValue() % FLAGS_key_range;            
       }
-      GenerateKeyFromInt(k, FLAGS_num, &key);
+      GenerateKeyFromInt(k, FLAGS_key_range, &key);
 
       // 쓰기 작업 수행
       if (FLAGS_benchmark_write_rate_limit > 0) { 
@@ -7431,11 +7495,117 @@ class Benchmark {
     thread->stats.AddMessage(msg);
   }
 
+  void FillStep(ThreadState* thread) { // performs rand->zipf d8, d9, 1, 1.1
+    // ReadOptions options(FLAGS_verify_checksum, true);
+    // RandomGenerator gen;
+    // init_zipf_generator(0, FLAGS_num, bench_params.zipf_const);
+    //   
+    // std::string value;
+    // int64_t writes_done = 0;
+    // int64_t nums = FLAGS_num;
+    // Duration duration(FLAGS_duration, 0);
+    //
+    // std::unique_ptr<const char[]> key_guard;
+    // Slice key = AllocateKey(&key_guard);
+    //
+    // if (FLAGS_benchmark_write_rate_limit > 0) {
+    //   printf(">>>> FLAGS_benchmark_write_rate_limit YCSBA \n");
+    //   thread->shared->write_rate_limiter.reset(
+    //       NewGenericRateLimiter(FLAGS_benchmark_write_rate_limit));
+    // }
+
+    // do random write
+    FLAGS_num = 10000000;
+    char msg[100];
+    int64_t now;
+    Env::Default()->GetCurrentTime(&now);
+    snprintf(msg, sizeof(msg), "(%ld) Workload random started\n", now);
+    thread->stats.AddMessage(msg);
+    DoWrite(thread, RANDOM);
+    thread->stats.AddMessage("rand ended");
+
+
+    FLAGS_num = 10000000;
+    bench_params.zipf_const=0.8;
+    Env::Default()->GetCurrentTime(&now);
+    snprintf(msg, sizeof(msg), "(%ld) Workload zip 0.8 started\n", now);
+    thread->stats.AddMessage(msg);
+    YCSBWorkloadW(thread);
+
+    FLAGS_num = 10000000;
+    bench_params.zipf_const=0.9;
+    Env::Default()->GetCurrentTime(&now);
+    snprintf(msg, sizeof(msg), "(%ld) Workload zip 0.9 started\n", now);
+    thread->stats.AddMessage(msg);
+    YCSBWorkloadW(thread);
+
+    FLAGS_num = 10000000;
+    bench_params.zipf_const=0.99;
+    Env::Default()->GetCurrentTime(&now);
+    snprintf(msg, sizeof(msg), "(%ld) Workload zip 1 started\n", now);
+    thread->stats.AddMessage(msg);
+    YCSBWorkloadW(thread);
+
+    FLAGS_num = 10000000;
+    bench_params.zipf_const=1.1;
+    Env::Default()->GetCurrentTime(&now);
+    snprintf(msg, sizeof(msg), "(%ld) Workload zip 1.1 started\n", now);
+    thread->stats.AddMessage(msg);
+    YCSBWorkloadW(thread);
+  }
+
+  void OneKeyWrite(ThreadState* thread) {
+      ReadOptions options(FLAGS_verify_checksum, true);
+      RandomGenerator gen;
+        
+      std::string value;
+      int64_t writes_done = 0;
+      int64_t nums = FLAGS_num;
+      Duration duration(FLAGS_duration, 0);
+
+      std::unique_ptr<const char[]> key_guard;
+      Slice key = AllocateKey(&key_guard);
+
+      if (FLAGS_benchmark_write_rate_limit > 0) {
+        printf(">>>> FLAGS_benchmark_write_rate_limit YCSBA \n");
+        thread->shared->write_rate_limiter.reset(
+            NewGenericRateLimiter(FLAGS_benchmark_write_rate_limit));
+      }
+
+      // 전체 작업은 쓰기 작업만 수행
+      while (nums > 0) {
+        nums--;
+        DB* db = SelectDB(thread);
+           
+        long k = 1; // LYM: use only one key
+        GenerateKeyFromInt(k, FLAGS_num, &key);
+
+        // 쓰기 작업 수행
+        if (FLAGS_benchmark_write_rate_limit > 0) { 
+          thread->shared->write_rate_limiter->Request(
+              value_size_ + key_size_, Env::IO_HIGH,
+              nullptr /* stats */, RateLimiter::OpType::kWrite);
+          thread->stats.ResetLastOpTime();
+        }
+        Status s = db->Put(write_options_, key, gen.Generate(value_size_));
+        if (!s.ok()) {
+          //fprintf(stderr, "put error: %s\n", s.ToString().c_str());
+          //exit(1);
+        } else {
+          writes_done++;
+          thread->stats.FinishedOps(nullptr, db, 1, kWrite);
+        }                
+      } 
+      char msg[100];
+      snprintf(msg, sizeof(msg), "( writes:%" PRIu64 " total:%" PRIu64 ")",
+               writes_done, readwrites_);
+      thread->stats.AddMessage(msg);
+  }
 
   void LatestGenerator(__attribute__((unused)) ThreadState* thread){
     printf("Latest Generator distribution test\n");
     // Need a zipf generator
-    init_zipf_generator(0, 50);
+    init_zipf_generator(0, 50, bench_params.zipf_const);
     init_latestgen(50);
 
     for (int i=0; i<100; i++){
@@ -7447,7 +7617,7 @@ class Benchmark {
 
   void Zipf(__attribute__((unused)) ThreadState* thread) {
     printf("ZIPF distribution test\n");
-    init_zipf_generator(0, 1000);
+    init_zipf_generator(0, 1000, bench_params.zipf_const);
     long vect[1000];
     for (int i = 0; i<1000; i++){
         vect[i] = 0;
@@ -9278,6 +9448,7 @@ int db_bench_tool(int argc, char** argv) {
     initialized = true;
   }
   ParseCommandLineFlags(&argc, &argv, true);
+  bench_params.zipf_const = FLAGS_zipf_const;
   FLAGS_compaction_style_e =
       (ROCKSDB_NAMESPACE::CompactionStyle)FLAGS_compaction_style;
   if (FLAGS_statistics && !FLAGS_statistics_string.empty()) {
@@ -9418,7 +9589,7 @@ int db_bench_tool(int argc, char** argv) {
     exit(1);
   }
 
-  init_zipf_generator(0, FLAGS_num);
+  init_zipf_generator(0, FLAGS_num, bench_params.zipf_const);
   init_latestgen(FLAGS_num);
 
   ROCKSDB_NAMESPACE::Benchmark benchmark;

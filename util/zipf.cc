@@ -23,10 +23,10 @@ double zeta2theta;       // initialized in init_zipf_generator function
 long countforzeta;       // initialized in init_zipf_generator function
 long lastVal;            // initialized in setLastValue
 
-void init_zipf_generator(long min, long max) {
+void init_zipf_generator(long min, long max, double zipfConst) {
   items = max - min + 1;
   base = min;
-  zipfianconstant = 1.1;
+  zipfianconstant = zipfConst;
   theta = zipfianconstant;
   zeta2theta = zeta(0, 2, 0);
   alpha = 1.0 / (1.0 - theta);

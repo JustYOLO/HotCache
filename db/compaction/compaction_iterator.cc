@@ -134,6 +134,12 @@ CompactionIterator::CompactionIterator(
 
 CompactionIterator::~CompactionIterator() {
   // input_ Iterator lifetime is longer than pinned_iters_mgr_ lifetime
+  // Log the count for the last key if it appeared more than once.
+  if (has_current_user_key_ && current_user_key_count_ > 1) {
+    // ROCKS_LOG_INFO(
+    //     info_log_, "CompactionIterator: Saw user key %s %" PRIu64 " times.",
+    //     current_user_key_.ToString(true).c_str(), current_user_key_count_);
+  }
   input_.SetPinnedItersMgr(nullptr);
 }
 
@@ -521,6 +527,14 @@ void CompactionIterator::NextFromInput() {
     // is a copy of the current input key (maybe converted to a delete by the
     // compaction filter). ikey_.user_key is pointing to the copy.
     if (!has_current_user_key_ || !user_key_equal_without_ts || cmp_ts != 0) {
+      // Log the count for the previous key if it appeared more than once.
+      if (has_current_user_key_ && current_user_key_count_ > 1) {
+        // ROCKS_LOG_INFO(
+        //     info_log_, "CompactionIterator: Saw user key %s %" PRIu64 "
+        //     times.", current_user_key_.ToString(true).c_str(),
+        //     current_user_key_count_);
+      }
+      current_user_key_count_ = 1;
       // First occurrence of this user key
       // Copy key for output
       key_ = current_key_.SetInternalKey(key_, &ikey_);
@@ -570,6 +584,7 @@ void CompactionIterator::NextFromInput() {
         break;
       }
     } else {
+      current_user_key_count_++;
       // Update the current key to reflect the new sequence number/type without
       // copying the user key.
       // TODO(rven): Compaction filter does not process keys in this path

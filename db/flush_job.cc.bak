@@ -11,7 +11,6 @@
 
 #include <algorithm>
 #include <cinttypes>
-#include <cstdint>
 #include <vector>
 
 #include "db/builder.h"
@@ -898,7 +897,8 @@ Status FlushJob::WriteLevel0Table() {
     uint64_t total_num_range_deletes = 0;
     // Used for testing:
     uint64_t mems_size = mems_.size();
-    (void)mems_size;
+    (void)mems_size;  // avoids unused variable error when
+                      // TEST_SYNC_POINT_CALLBACK not used.
     TEST_SYNC_POINT_CALLBACK("FlushJob::WriteLevel0Table:num_memtables",
                              &mems_size);
     assert(job_context_);
@@ -933,135 +933,9 @@ Status FlushJob::WriteLevel0Table() {
       total_num_range_deletes += m->NumRangeDeletion();
     }
 
-    // ========== BEGIN: per-memtable logging (no deduplication) ==========
-    {
-      // Base directory for memtable logs
-      std::string log_dir =
-          db_options_.db_log_dir.empty() ? dbname_ : db_options_.db_log_dir;
-      log_dir += "/memtable_logs";
-
-      // Best-effort directory creation
-      Status dir_s = db_options_.env->CreateDirIfMissing(log_dir);
-      if (!dir_s.ok()) {
-        ROCKS_LOG_WARN(db_options_.info_log,
-                       "[%s] [JOB %d] Failed to create memtable log dir %s: %s",
-                       cfd_->GetName().c_str(), job_context_->job_id,
-                       log_dir.c_str(), dir_s.ToString().c_str());
-        // Continue flush even if logging directory cannot be created.
-      } else {
-        // For each immutable memtable, generate one log file and dump all
-        // internal entries (including duplicates and deletions).
-        for (ReadOnlyMemTable* m : mems_) {
-          // Build file name:
-          //   <log_dir>/<cf_name>_mem_<id>_seq_<first_seq>.log
-          char fname_buf[512];
-          const uint64_t mem_id = m->GetID();
-          // const uint64_t first_seq = m->GetFirstSequenceNumber();
-          // snprintf(fname_buf, sizeof(fname_buf),
-          //          "%s/%s_mem_%" PRIu64 "_seq_%" PRIu64 ".log",
-          //          log_dir.c_str(), cfd_->GetName().c_str(),
-          //          static_cast<uint64_t>(mem_id),
-          //          static_cast<uint64_t>(first_seq));
-          snprintf(fname_buf, sizeof(fname_buf), "%s/%s_mem_%" PRIu64 ".log",
-                   log_dir.c_str(), cfd_->GetName().c_str(),
-                   static_cast<uint64_t>(mem_id));
-          std::string fname(fname_buf);
-
-          std::unique_ptr<WritableFile> log_file;
-          EnvOptions log_env_opts(file_options_);
-          Status log_s =
-              db_options_.env->NewWritableFile(fname, &log_file, log_env_opts);
-          if (!log_s.ok()) {
-            ROCKS_LOG_WARN(
-                db_options_.info_log,
-                "[%s] [JOB %d] Failed to open memtable log file %s: %s",
-                cfd_->GetName().c_str(), job_context_->job_id, fname.c_str(),
-                log_s.ToString().c_str());
-            // Skip this memtable’s log but continue with others and with flush.
-            continue;
-          }
-
-          ReadOptions log_ro;
-          log_ro.total_order_seek = true;
-          log_ro.io_activity = Env::IOActivity::kFlush;
-
-          Arena log_arena;
-          InternalIterator* log_it = nullptr;
-          if (logical_strip_timestamp) {
-            log_it = m->NewTimestampStrippingIterator(
-                log_ro, /*seqno_to_time_mapping=*/nullptr, &log_arena,
-                /*prefix_extractor=*/nullptr, ts_sz);
-          } else {
-            log_it =
-                m->NewIterator(log_ro,
-                               /*seqno_to_time_mapping=*/nullptr, &log_arena,
-                               /*prefix_extractor=*/nullptr,
-                               /*for_flush=*/true);
-          }
-
-          if (log_it != nullptr) {
-            for (log_it->SeekToFirst(); log_it->Valid(); log_it->Next()) {
-              ParsedInternalKey ikey;
-              Status pik_status = ParseInternalKey(log_it->key(), &ikey,
-                                                   /*log_err_key=*/false);
-              if (!pik_status.ok()) {
-                // Skip unparsable keys; any real corruption will surface
-                // elsewhere.
-                continue;
-              }
-
-              const Slice& user_key = ikey.user_key;
-              const Slice& value = log_it->value();
-
-              // Simple text format:
-              // seq,type,user_key_hex,value_hex\n
-              // (You can change this to any format you prefer.)
-              std::string line;
-              line.reserve(64 + user_key.size() * 2 + value.size() * 2);
-
-              line.append(std::to_string(ikey.sequence));
-              line.push_back(',');
-              line.append(std::to_string(static_cast<int>(ikey.type)));
-              line.push_back(',');
-
-              // user_key as hex
-              for (size_t i = 0; i < user_key.size(); ++i) {
-                unsigned char c =
-                    static_cast<unsigned char>(user_key.data()[i]);
-                char buf[3];
-                snprintf(buf, sizeof(buf), "%02X", c);
-                line.append(buf);
-              }
-              // line.push_back(',');
-              //
-              // // value as hex
-              // for (size_t i = 0; i < value.size(); ++i) {
-              //   unsigned char c = static_cast<unsigned
-              //   char>(value.data()[i]); char buf[3]; snprintf(buf,
-              //   sizeof(buf), "%02X", c); line.append(buf);
-              // }
-              line.push_back('\n');
-
-              log_s = log_file->Append(line);
-              if (!log_s.ok()) {
-                ROCKS_LOG_WARN(db_options_.info_log,
-                               "[%s] [JOB %d] Failed to append to memtable log "
-                               "file %s: %s",
-                               cfd_->GetName().c_str(), job_context_->job_id,
-                               fname.c_str(), log_s.ToString().c_str());
-                break;
-              }
-            }
-
-            // Flush best-effort; do not affect main flush status.
-            log_file->Flush();
-          }
-        }
-      }
-    }
-    // ========== END: per-memtable logging (no deduplication) ==========
-
-    // Existing event logging and SST build code continues unchanged
+    // TODO(cbi): when memtable is flushed due to number of range deletions
+    //  hitting limit memtable_max_range_deletions, flush_reason_ is still
+    //  "Write Buffer Full", should make update flush_reason_ accordingly.
     event_logger_->Log() << "job" << job_context_->job_id << "event"
                          << "flush_started" << "num_memtables" << mems_.size()
                          << "num_entries" << total_num_entries << "num_deletes"
