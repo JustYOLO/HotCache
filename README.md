@@ -1,4 +1,4 @@
-## I'm not the owner of this repo/code. The original repository is here: https://github.com/facebook/rocksdb
+## I'm not the original owner of this repo/code. The original repository is here: https://github.com/facebook/rocksdb
 
 ## RocksDB: A Persistent Key-Value Store for Flash and RAM Storage
 
