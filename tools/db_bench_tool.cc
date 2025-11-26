@@ -2913,9 +2913,6 @@ class Benchmark {
     return true;
   }
 
-  // New benchmark: replay Twitter trace directly as Get/Put workload.
-  // void TwitterTrace(ThreadState* thread);
-
   class ErrorHandlerListener : public EventListener {
    public:
     ErrorHandlerListener()
@@ -7666,7 +7663,7 @@ class Benchmark {
 
   // Lee: tt replay func
   void TwitterTrace(ThreadState* thread) {
-    // For simplicity, only support single DB (no multi_dbs_).
+    // Single-DB assumption for simplicity.
     if (db_.db == nullptr) {
       fprintf(stderr, "twittertrace: only single-DB mode is supported.\n");
       ErrorExit();
@@ -7687,7 +7684,14 @@ class Benchmark {
       ErrorExit();
     }
 
-    // Approximate text-bytes limit per chunk. 0 means "no limit".
+    // Approximate file size for progress reporting (may be 0 if unknown).
+    uint64_t file_size = 0;
+    Status fs_s = FLAGS_env->GetFileSize(FLAGS_twitter_trace_file, &file_size);
+    if (!fs_s.ok()) {
+      file_size = 0;
+    }
+
+    // Approximate text-bytes limit per chunk.
     const uint64_t chunk_limit = (FLAGS_twitter_chunk_bytes == 0)
                                      ? std::numeric_limits<uint64_t>::max()
                                      : FLAGS_twitter_chunk_bytes;
@@ -7696,7 +7700,8 @@ class Benchmark {
     uint64_t total_gets = 0;
     uint64_t total_puts = 0;
     uint64_t total_found = 0;
-    uint64_t total_bytes = 0;  // bytes transferred via DB operations
+    uint64_t total_bytes = 0;       // bytes transferred via DB operations
+    uint64_t total_text_bytes = 0;  // NEW: raw text bytes read from trace
 
     ReadOptions read_opts = read_options_;
     WriteOptions write_opts = write_options_;
@@ -7704,10 +7709,12 @@ class Benchmark {
     std::string line;
     std::string value_buf;  // reused dummy value buffer
 
+    uint64_t chunk_index = 0;
+
     while (true) {
       // One chunk: load lines until chunk_limit is reached (in text bytes)
       std::vector<TwitterTraceRecord> records;
-      records.reserve(1024);  // avoid frequent small reallocations
+      records.reserve(1024);
 
       uint64_t text_bytes_in_chunk = 0;
 
@@ -7726,6 +7733,32 @@ class Benchmark {
         // No more data to process (EOF or only malformed lines remain)
         break;
       }
+
+      chunk_index++;
+      total_text_bytes += text_bytes_in_chunk;
+
+      // Optional: progress just after loading the chunk
+      if (file_size > 0) {
+        double pct = 100.0 * static_cast<long double>(total_text_bytes) /
+                     static_cast<long double>(file_size);
+        fprintf(stdout,
+                "twittertrace: loaded chunk %" PRIu64
+                " (%.3f GiB text, %.2f%% of file)\n",
+                chunk_index,
+                static_cast<double>(text_bytes_in_chunk) /
+                    (1024.0 * 1024.0 * 1024.0),
+                pct);
+      } else {
+        fprintf(
+            stdout,
+            "twittertrace: loaded chunk %" PRIu64
+            " (%.3f GiB text, cumulative %.3f GiB)\n",
+            chunk_index,
+            static_cast<double>(text_bytes_in_chunk) /
+                (1024.0 * 1024.0 * 1024.0),
+            static_cast<double>(total_text_bytes) / (1024.0 * 1024.0 * 1024.0));
+      }
+      fflush(stdout);
 
       // Replay this chunk into RocksDB
       uint64_t chunk_lines = 0;
@@ -7786,13 +7819,20 @@ class Benchmark {
       total_found += chunk_found;
       total_bytes += chunk_bytes;
 
-      // If EOF reached, stop; otherwise, loop to read next chunk
+      // Progress after replaying the chunk
+      fprintf(stdout,
+              "twittertrace: replayed chunk %" PRIu64 " (lines:%" PRIu64
+              ", gets:%" PRIu64 ", puts:%" PRIu64 ")\n",
+              chunk_index, chunk_lines, chunk_gets, chunk_puts);
+      fflush(stdout);
+
+      // If EOF reached, stop; otherwise, next iteration will load another chunk
       if (!in.good() && in.eof()) {
         break;
       }
     }
 
-    // Report statistics through db_bench stats mechanism
+    // Final statistics
     thread->stats.AddBytes(total_bytes);
 
     char msg[256];

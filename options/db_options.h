@@ -108,6 +108,9 @@ struct ImmutableDBOptions {
   Temperature metadata_write_temperature;
   Temperature wal_write_temperature;
 
+  // Lee: memtable logging flag
+  bool enable_memtable_logging;
+
   // Beginning convenience/helper objects that are not part of the base
   // DBOptions
   std::shared_ptr<FileSystem> fs;

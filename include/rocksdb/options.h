@@ -535,6 +535,11 @@ class CompactionService : public Customizable {
 };
 
 struct DBOptions {
+  // Lee: If true, FlushJob will emit a per-memtable log containing all internal
+  // key entries before flushing the immutable memtable to SST.
+  // Default: false (no extra logging; upstream behavior).
+  bool enable_memtable_logging = false;
+
   // The function recovers options to the option as in version 4.6.
   // NOT MAINTAINED: This function has not been and is not maintained.
   // DEPRECATED: This function might be removed in a future release.

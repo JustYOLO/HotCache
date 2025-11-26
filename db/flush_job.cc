@@ -934,7 +934,7 @@ Status FlushJob::WriteLevel0Table() {
     }
 
     // ========== BEGIN: per-memtable logging (no deduplication) ==========
-    {
+    if (db_options_.enable_memtable_logging) {
       // Base directory for memtable logs
       std::string log_dir =
           db_options_.db_log_dir.empty() ? dbname_ : db_options_.db_log_dir;
