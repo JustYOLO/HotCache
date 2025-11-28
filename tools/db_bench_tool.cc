@@ -1859,44 +1859,11 @@ DEFINE_string(
     "Optional file to persist last processed byte offset for Twitter trace. "
     "If empty, always start from beginning of twitter_trace_file.");
 
-// Lee: end of tt gflags
+// Lee: memtable logging options
 
-// Lee: tt helper funcs
-
-// namespace {
-//
-// // Load last processed byte offset for Twitter trace from a small text file.
-// uint64_t LoadTwitterOffset() {
-//   if (FLAGS_twitter_offset_file.empty()) {
-//     return 0;
-//   }
-//   std::ifstream in(FLAGS_twitter_offset_file);
-//   if (!in) {
-//     return 0;
-//   }
-//   unsigned long long off = 0;
-//   if (in >> off) {
-//     return static_cast<uint64_t>(off);
-//   }
-//   return 0;
-// }
-//
-// // Save last processed byte offset for Twitter trace.
-// void SaveTwitterOffset(uint64_t off) {
-//   if (FLAGS_twitter_offset_file.empty()) {
-//     return;
-//   }
-//   std::ofstream out(FLAGS_twitter_offset_file, std::ios::trunc);
-//   if (!out) {
-//     fprintf(stderr,
-//             "Warning: failed to open twitter_offset_file '%s' for write\n",
-//             FLAGS_twitter_offset_file.c_str());
-//     return;
-//   }
-//   out << static_cast<unsigned long long>(off);
-// }
-//
-// }  // namespace
+DEFINE_bool(enable_memtable_logging, false,
+            "If true, enable experimental memtable logging before flush "
+            "(writes per-memtable log files).");
 
 namespace ROCKSDB_NAMESPACE {
 namespace {
@@ -4413,6 +4380,7 @@ class Benchmark {
 
     assert(db_.db == nullptr);
 
+    options.enable_memtable_logging = FLAGS_enable_memtable_logging;
     options.env = FLAGS_env;
     options.wal_dir = FLAGS_wal_dir;
     options.dump_malloc_stats = FLAGS_dump_malloc_stats;
