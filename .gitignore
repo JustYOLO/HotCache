@@ -1,6 +1,16 @@
 make_config.mk
 rocksdb.pc
 
+<<<<<<< Updated upstream
+=======
+db_bench
+
+cowork/
+data/
+results/mempurge/
+results/
+
+>>>>>>> Stashed changes
 *.a
 *.arc
 *.d
