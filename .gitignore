@@ -3,6 +3,10 @@ rocksdb.pc
 
 db_bench
 
+cowork/
+data/
+results/mempurge/
+
 *.a
 *.arc
 *.d
