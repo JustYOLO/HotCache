@@ -70,6 +70,9 @@ Status DBImplFollower::Recover(
     }
     return s;
   }
+  if (immutable_db_options_.paranoid_checks && s.ok()) {
+    s = CheckConsistency();
+  }
   if (s.ok()) {
     default_cf_handle_ = new ColumnFamilyHandleImpl(
         versions_->GetColumnFamilySet()->GetDefault(), this, &mutex_);
@@ -137,8 +140,10 @@ Status DBImplFollower::TryCatchUpWithLeader() {
           // to super versions in a lock free manner, it checks the earliest
           // sequence number to detect if there was a change in version in
           // the meantime.
+          const MutableCFOptions mutable_cf_options =
+              *cfd->GetLatestMutableCFOptions();
           MemTable* new_mem = cfd->ConstructNewMemtable(
-              cfd->GetLatestMutableCFOptions(), versions_->LastSequence());
+              mutable_cf_options, versions_->LastSequence());
           cfd->mem()->SetNextLogNumber(cfd->GetLogNumber());
           cfd->mem()->ConstructFragmentedRangeTombstones();
           cfd->imm()->Add(cfd->mem(), &job_context.memtables_to_free);
@@ -293,9 +298,9 @@ Status DB::OpenAsFollower(
   DBImplFollower* impl =
       new DBImplFollower(tmp_opts, std::move(new_env), dbname, src_path);
   impl->versions_.reset(new ReactiveVersionSet(
-      dbname, &impl->immutable_db_options_, impl->mutable_db_options_,
-      impl->file_options_, impl->table_cache_.get(),
-      impl->write_buffer_manager_, &impl->write_controller_, impl->io_tracer_));
+      dbname, &impl->immutable_db_options_, impl->file_options_,
+      impl->table_cache_.get(), impl->write_buffer_manager_,
+      &impl->write_controller_, impl->io_tracer_));
   impl->column_family_memtables_.reset(
       new ColumnFamilyMemTablesImpl(impl->versions_->GetColumnFamilySet()));
   impl->wal_in_db_path_ = impl->immutable_db_options_.IsWalDirSameAsDBPath();

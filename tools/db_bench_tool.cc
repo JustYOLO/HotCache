@@ -7,6 +7,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file. See the AUTHORS file for names of contributors.
 
+#include <gflags/gflags.h>
+
+#include <cstdint>
 #ifdef GFLAGS
 #ifdef NUMA
 #include <numa.h>
@@ -31,11 +34,13 @@
 #include <cinttypes>
 #include <condition_variable>
 #include <cstddef>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <mutex>
 #include <optional>
 #include <queue>
+#include <sstream>
 #include <thread>
 #include <unordered_map>
 
@@ -62,7 +67,6 @@
 #include "rocksdb/slice_transform.h"
 #include "rocksdb/stats_history.h"
 #include "rocksdb/table.h"
-#include "rocksdb/tool_hooks.h"
 #include "rocksdb/utilities/backup_engine.h"
 #include "rocksdb/utilities/object_registry.h"
 #include "rocksdb/utilities/optimistic_transaction_db.h"
@@ -81,18 +85,20 @@
 #include "util/crc32c.h"
 #include "util/file_checksum_helper.h"
 #include "util/gflags_compat.h"
+#include "util/latest-generator.h"
 #include "util/mutexlock.h"
 #include "util/random.h"
-#include "util/simple_mixed_compressor.h"
 #include "util/stderr_logger.h"
 #include "util/string_util.h"
 #include "util/xxhash.h"
+#include "util/zipf.h"
 #include "utilities/blob_db/blob_db.h"
 #include "utilities/counted_fs.h"
 #include "utilities/merge_operators.h"
 #include "utilities/merge_operators/bytesxor.h"
 #include "utilities/merge_operators/sortlist.h"
 #include "utilities/persistent_cache/block_cache_tier.h"
+
 #ifdef MEMKIND
 #include "memory/memkind_kmem_allocator.h"
 #endif
@@ -113,6 +119,7 @@ DEFINE_string(
     "fillsync,"
     "fillrandom,"
     "filluniquerandomdeterministic,"
+    "useCustom,"
     "overwrite,"
     "readrandom,"
     "newiterator,"
@@ -129,7 +136,6 @@ DEFINE_string(
     "compact1,"
     "waitforcompaction,"
     "multireadrandom,"
-    "multiscan,"
     "mixgraph,"
     "readseq,"
     "readtorowcache,"
@@ -159,7 +165,16 @@ DEFINE_string(
     "readrandomoperands,"
     "backup,"
     "restore,"
-    "openandcompact,"
+    "testzipf,"
+    "ycsbwklda,"
+    "ycsbwkldb,"
+    "ycsbwkldc,"
+    "ycsbwkldd,"
+    "ycsbwklde,"
+    "ycsbwkldf,"
+    "ycsbwkldw,"
+    "fillzip,"
+    "testlatestgenerator,"
     "approximatememtablestats",
 
     "Comma-separated list of operations to run in the specified"
@@ -231,9 +246,6 @@ DEFINE_string(
     "\tcompact1  -- compact L1 into L2\n"
     "\twaitforcompaction - pause until compaction is (probably) done\n"
     "\tflush - flush the memtable\n"
-    "\topenandcompact -- Open DB and compact all files to bottommost level, "
-    "writing output to separate directory without modifying source DB. "
-    "Designed for remote compaction service testing\n"
     "\tstats       -- Print DB stats\n"
     "\tresetstats  -- Reset DB stats\n"
     "\tlevelstats  -- Print the number of files and bytes per level\n"
@@ -338,12 +350,8 @@ DEFINE_bool(use_uint64_comparator, false, "use Uint64 user comparator");
 
 DEFINE_int64(batch_size, 1, "Batch size");
 
-DEFINE_int64(multiscan_size, 10,
-             "MultiScan size - number of multiscans of size `batch_size`");
-
-DEFINE_int64(
-    multiscan_stride, 100,
-    "The amount of keys between two successive Scan operations in multiscan");
+DEFINE_bool(YCSB_uniform_distribution, false,
+            "Uniform key distribution for YCSB");
 
 static bool ValidateKeySize(const char* /*flagname*/, int32_t /*value*/) {
   return true;
@@ -365,6 +373,22 @@ DEFINE_int32(user_timestamp_size, 0,
 
 DEFINE_int32(num_multi_db, 0,
              "Number of DBs used in the benchmark. 0 means single DB.");
+
+DEFINE_double(zipf_const, 0.99, "Zipfian constant for Zipf distribution");
+
+DEFINE_int64(key_range, 10000000, "zipf key range");
+struct BenchmarkParams {
+  double zipf_const;
+  int64_t key_range;
+  bool memDist;
+  // you can add more benchmark‐only flags here in future
+};
+
+static BenchmarkParams bench_params;
+
+DEFINE_bool(set_memtable_key_appearance_distribution, false,
+            "LYM custom option. If true, outputs memtable key appearance"
+            "distribution data");
 
 DEFINE_double(compression_ratio, 0.5,
               "Arrange to generate values that shrink to this fraction of "
@@ -446,14 +470,6 @@ DEFINE_int64(db_write_buffer_size,
              ROCKSDB_NAMESPACE::Options().db_write_buffer_size,
              "Number of bytes to buffer in all memtables before compacting");
 
-DEFINE_int64(max_manifest_file_size,
-             ROCKSDB_NAMESPACE::Options().max_manifest_file_size,
-             "Max manifest file size (or minimum max with auto-tuning)");
-
-DEFINE_int32(max_manifest_space_amp_pct,
-             ROCKSDB_NAMESPACE::Options().max_manifest_space_amp_pct,
-             "Max manifest space amp percentage for auto-tuning");
-
 DEFINE_bool(cost_write_buffer_to_cache, false,
             "The usage of memtable is costed to the block cache");
 
@@ -478,6 +494,20 @@ DEFINE_int32(min_write_buffer_number_to_merge,
              " in all of these files. Also, an in-memory merge may result in"
              " writing less data to storage if there are duplicate records "
              " in each of these individual write buffers.");
+
+DEFINE_int32(max_write_buffer_number_to_maintain,
+             ROCKSDB_NAMESPACE::Options().max_write_buffer_number_to_maintain,
+             "The total maximum number of write buffers to maintain in memory "
+             "including copies of buffers that have already been flushed. "
+             "Unlike max_write_buffer_number, this parameter does not affect "
+             "flushing. This controls the minimum amount of write history "
+             "that will be available in memory for conflict checking when "
+             "Transactions are used. If this value is too low, some "
+             "transactions may fail at commit time due to not being able to "
+             "determine whether there were any write conflicts. Setting this "
+             "value to 0 will cause write buffers to be freed immediately "
+             "after they are flushed.  If this value is set to -1, "
+             "'max_write_buffer_number' will be used.");
 
 DEFINE_int64(max_write_buffer_size_to_maintain,
              ROCKSDB_NAMESPACE::Options().max_write_buffer_size_to_maintain,
@@ -587,7 +617,7 @@ DEFINE_double(cache_high_pri_pool_ratio, 0.0,
 DEFINE_double(cache_low_pri_pool_ratio, 0.0,
               "Ratio of block cache reserve for low pri blocks.");
 
-DEFINE_string(cache_type, "hyper_clock_cache", "Type of block cache.");
+DEFINE_string(cache_type, "lru_cache", "Type of block cache.");
 
 DEFINE_bool(use_compressed_secondary_cache, false,
             "Use the CompressedSecondaryCache as the secondary cache.");
@@ -616,9 +646,6 @@ static enum ROCKSDB_NAMESPACE::CompressionType
     FLAGS_compressed_secondary_cache_compression_type_e =
         ROCKSDB_NAMESPACE::kLZ4Compression;
 
-DEFINE_string(compression_manager, "none",
-              "Set the compression manager type to mixed(roundrobin) or other "
-              "type. None for BuilInCompressor");
 DEFINE_int32(compressed_secondary_cache_compression_level,
              ROCKSDB_NAMESPACE::CompressionOptions().level,
              "Compression level. The meaning of this value is library-"
@@ -729,16 +756,6 @@ DEFINE_bool(block_align,
             ROCKSDB_NAMESPACE::BlockBasedTableOptions().block_align,
             "Align data blocks on page size");
 
-DEFINE_uint64(
-    super_block_alignment_size,
-    ROCKSDB_NAMESPACE::BlockBasedTableOptions().super_block_alignment_size,
-    "Configure super block size");
-
-DEFINE_uint64(super_block_alignment_space_overhead_ratio,
-              ROCKSDB_NAMESPACE::BlockBasedTableOptions()
-                  .super_block_alignment_space_overhead_ratio,
-              "Configure space overhead for super block alignment");
-
 DEFINE_int64(prepopulate_block_cache, 0,
              "Pre-populate hot/warm blocks in block cache. 0 to disable and 1 "
              "to insert during flush");
@@ -780,6 +797,9 @@ DEFINE_uint64(compaction_readahead_size,
               "Compaction readahead size");
 
 DEFINE_int32(log_readahead_size, 0, "WAL and manifest readahead size");
+
+DEFINE_int32(random_access_max_buffer_size, 1024 * 1024,
+             "Maximum windows randomaccess buffer size");
 
 DEFINE_int32(writable_file_max_buffer_size, 1024 * 1024,
              "Maximum write buffer for Writable File");
@@ -1303,38 +1323,6 @@ DEFINE_bool(
 DEFINE_bool(paranoid_memory_checks, false,
             "Sets CF option paranoid_memory_checks");
 
-DEFINE_bool(memtable_veirfy_per_key_checksum_on_seek, false,
-            "Sets CF option memtable_veirfy_per_key_checksum_on_seek");
-
-DEFINE_bool(
-    auto_refresh_iterator_with_snapshot, false,
-    "When set to true, RocksDB iterator will automatically refresh itself "
-    "upon detecting stale superversion - preserving its' original snapshot");
-
-DEFINE_bool(explicit_snapshot, false,
-            "When set to true iterators will be initialized with explicit "
-            "snapshot");
-
-DEFINE_uint32(memtable_op_scan_flush_trigger,
-              ROCKSDB_NAMESPACE::AdvancedColumnFamilyOptions()
-                  .memtable_op_scan_flush_trigger,
-              "Setting for CF option memtable_op_scan_flush_trigger.");
-
-DEFINE_bool(verify_compression, false,
-            "See BlockBasedTableOptions::verify_compression");
-
-ROCKSDB_NAMESPACE::ToolHooks* hooks_ = nullptr;
-[[noreturn]] void db_bench_exit(int status) {
-  if (hooks_ == nullptr) {
-    exit(status);
-  }
-
-  hooks_->Exit(status);
-
-  // We should exit here but in case they don't we exit anyway.
-  exit(-1);
-};
-
 static enum ROCKSDB_NAMESPACE::CompressionType StringToCompressionType(
     const char* ctype) {
   assert(ctype);
@@ -1357,7 +1345,7 @@ static enum ROCKSDB_NAMESPACE::CompressionType StringToCompressionType(
     return ROCKSDB_NAMESPACE::kZSTD;
   } else {
     fprintf(stderr, "Cannot parse compression type '%s'\n", ctype);
-    db_bench_exit(1);
+    exit(1);
   }
 }
 
@@ -1377,7 +1365,7 @@ static enum ROCKSDB_NAMESPACE::TieredAdmissionPolicy StringToAdmissionPolicy(
     return ROCKSDB_NAMESPACE::kAdmPolicyAllowAll;
   } else {
     fprintf(stderr, "Cannot parse admission policy %s\n", policy);
-    db_bench_exit(1);
+    exit(1);
   }
 }
 
@@ -1775,10 +1763,6 @@ DEFINE_uint64(stats_history_buffer_size,
 DEFINE_bool(avoid_flush_during_recovery,
             ROCKSDB_NAMESPACE::Options().avoid_flush_during_recovery,
             "If true, avoids flushing the recovered WAL data where possible.");
-
-DEFINE_bool(avoid_flush_during_shutdown,
-            ROCKSDB_NAMESPACE::Options().avoid_flush_during_shutdown,
-            "If true, avoids flushing the recovered WAL data where possible.");
 DEFINE_int64(multiread_stride, 0,
              "Stride length for the keys in a MultiGet batch");
 DEFINE_bool(multiread_batched, false, "Use the new MultiGet API");
@@ -1861,40 +1845,25 @@ DEFINE_bool(build_info, false,
 DEFINE_bool(track_and_verify_wals_in_manifest, false,
             "If true, enable WAL tracking in the MANIFEST");
 
-DEFINE_bool(track_and_verify_wals, false, "See Options.track_and_verify_wals");
+// Lee: twitter trace(tt) gflags
 
-DEFINE_int32(same_value_percentage, 0,
-             "Percentage of time value will be same i.e good for compression "
-             "of the block");
+DEFINE_string(twitter_trace_file, "",
+              "Path to Twitter trace file (e.g., cluster41.sort).");
 
-DEFINE_bool(universal_reduce_file_locking,
-            ROCKSDB_NAMESPACE::Options()
-                .compaction_options_universal.reduce_file_locking,
-            "See Options().compaction_options_universal.reduce_file_locking");
+DEFINE_uint64(twitter_chunk_bytes, 10ULL * 1024 * 1024 * 1024,
+              "Maximum number of bytes of Twitter trace to process in one run. "
+              "0 means process until EOF.");
 
-DEFINE_uint64(
-    multiscan_coalesce_threshold,
-    ROCKSDB_NAMESPACE::MultiScanArgs(ROCKSDB_NAMESPACE::BytewiseComparator())
-        .io_coalesce_threshold,
-    "Configures io coalescing threshold for multiscans");
+DEFINE_string(
+    twitter_offset_file, "",
+    "Optional file to persist last processed byte offset for Twitter trace. "
+    "If empty, always start from beginning of twitter_trace_file.");
 
-DEFINE_bool(
-    multiscan_use_async_io,
-    ROCKSDB_NAMESPACE::MultiScanArgs(ROCKSDB_NAMESPACE::BytewiseComparator())
-        .use_async_io,
-    "Sets MultiScanArgs::use_async_io");
+// Lee: memtable logging options
 
-DEFINE_bool(openandcompact_allow_resumption, false,
-            "Whether to keep existing progress and enable resume compaction in "
-            "OpenAndCompact benchmark");
-
-DEFINE_bool(openandcompact_test_cancel_on_odd, false,
-            "During OpenAndCompact[Xn], odd runs gets cancelled "
-            "after specified `openandcompact_cancel_after_millseconds`");
-
-DEFINE_uint32(openandcompact_cancel_after_millseconds, 1,
-              "Time to wait before cancelling compaction in odd runs when "
-              "openandcompact_test_cancel_on_odd is true");
+DEFINE_bool(enable_memtable_logging, false,
+            "If true, enable experimental memtable logging before flush "
+            "(writes per-memtable log files).");
 
 namespace ROCKSDB_NAMESPACE {
 namespace {
@@ -1940,7 +1909,7 @@ static enum DistributionType StringToDistributionType(const char* ctype) {
   }
 
   fprintf(stdout, "Cannot parse distribution type '%s'\n", ctype);
-  db_bench_exit(1);
+  exit(1);
 }
 
 class BaseDistribution {
@@ -2016,10 +1985,9 @@ class RandomGenerator {
   std::string data_;
   unsigned int pos_;
   std::unique_ptr<BaseDistribution> dist_;
-  Random rnd;
 
  public:
-  RandomGenerator() : rnd(301) {
+  RandomGenerator() {
     auto max_value_size = FLAGS_value_size_max;
     switch (FLAGS_value_size_distribution_type_e) {
       case kUniform:
@@ -2038,6 +2006,7 @@ class RandomGenerator {
     // We use a limited amount of data over and over again and ensure
     // that it is larger than the compression window (32KB), and also
     // large enough to serve all typical value sizes we want to write.
+    Random rnd(301);
     std::string piece;
     while (data_.size() < (unsigned)std::max(1048576, max_value_size)) {
       // Add a short fragment that is as compressible as specified
@@ -2050,15 +2019,11 @@ class RandomGenerator {
 
   Slice Generate(unsigned int len) {
     assert(len <= data_.size());
-    if (rnd.PercentTrue(FLAGS_same_value_percentage)) {
-      return Slice(data_.data(), len);
-    } else {
-      if (pos_ + len > data_.size()) {
-        pos_ = 0;
-      }
-      pos_ += len;
-      return Slice(data_.data() + pos_ - len, len);
+    if (pos_ + len > data_.size()) {
+      pos_ = 0;
     }
+    pos_ += len;
+    return Slice(data_.data() + pos_ - len, len);
   }
 
   Slice Generate() {
@@ -2259,8 +2224,7 @@ enum OperationType : unsigned char {
   kUncompress,
   kCrc,
   kHash,
-  kOthers,
-  kMultiScan
+  kOthers
 };
 
 static std::unordered_map<OperationType, std::string, std::hash<unsigned char>>
@@ -2269,7 +2233,7 @@ static std::unordered_map<OperationType, std::string, std::hash<unsigned char>>
                            {kMerge, "merge"},       {kUpdate, "update"},
                            {kCompress, "compress"}, {kCompress, "uncompress"},
                            {kCrc, "crc"},           {kHash, "hash"},
-                           {kOthers, "op"},         {kMultiScan, "multiscan"}};
+                           {kOthers, "op"}};
 
 class CombinedStats;
 class Stats {
@@ -2649,33 +2613,24 @@ class CombinedStats {
     const char* name = bench_name.c_str();
     int num_runs = static_cast<int>(throughput_ops_.size());
 
-    double avg_ops_per_sec = CalcAvg(throughput_ops_);
-    double avg_millis_per_op =
-        (avg_ops_per_sec > 0) ? (1000.0 / avg_ops_per_sec) : 0;
-
-    printf("\n");
-
     if (throughput_mbs_.size() == throughput_ops_.size()) {
       // \xC2\xB1 is +/- character in UTF-8
       fprintf(stdout,
-              "%s [AVG    %d runs] : %d (\xC2\xB1 %d) ops/sec; %.3f ms/op; "
-              "%6.1f (\xC2\xB1 "
+              "%s [AVG    %d runs] : %d (\xC2\xB1 %d) ops/sec; %6.1f (\xC2\xB1 "
               "%.1f) MB/sec\n"
               "%s [MEDIAN %d runs] : %d ops/sec; %6.1f MB/sec\n",
               name, num_runs, static_cast<int>(CalcAvg(throughput_ops_)),
               static_cast<int>(CalcConfidence95(throughput_ops_)),
-              avg_millis_per_op, CalcAvg(throughput_mbs_),
-              CalcConfidence95(throughput_mbs_), name, num_runs,
-              static_cast<int>(CalcMedian(throughput_ops_)),
+              CalcAvg(throughput_mbs_), CalcConfidence95(throughput_mbs_), name,
+              num_runs, static_cast<int>(CalcMedian(throughput_ops_)),
               CalcMedian(throughput_mbs_));
     } else {
       fprintf(stdout,
-              "%s [AVG    %d runs] : %d (\xC2\xB1 %d) ops/sec; %.3f ms/op\n"
+              "%s [AVG    %d runs] : %d (\xC2\xB1 %d) ops/sec\n"
               "%s [MEDIAN %d runs] : %d ops/sec\n",
               name, num_runs, static_cast<int>(CalcAvg(throughput_ops_)),
-              static_cast<int>(CalcConfidence95(throughput_ops_)),
-              avg_millis_per_op, name, num_runs,
-              static_cast<int>(CalcMedian(throughput_ops_)));
+              static_cast<int>(CalcConfidence95(throughput_ops_)), name,
+              num_runs, static_cast<int>(CalcMedian(throughput_ops_)));
     }
   }
 
@@ -2834,8 +2789,6 @@ class Duration {
   uint64_t start_at_;
 };
 
-// Global run counter for cancel/resume-OpenAndCompact() testing
-static std::atomic<int> openandcompact_run_counter{0};
 class Benchmark {
  private:
   std::shared_ptr<Cache> cache_;
@@ -2845,6 +2798,7 @@ class Benchmark {
   std::vector<DBWithColumnFamilies> multi_dbs_;
   int64_t num_;
   int key_size_;
+  int value_size_;
   int user_timestamp_size_;
   int prefix_size_;
   int total_thread_count_;
@@ -2869,6 +2823,62 @@ class Benchmark {
   bool use_blob_db_;    // Stacked BlobDB
   bool read_operands_;  // read via GetMergeOperands()
   std::vector<std::string> keys_;
+
+  // Lee: tt record & parse func
+  struct TwitterTraceRecord {
+    uint64_t timestamp = 0;
+    std::string key;
+    uint32_t key_size = 0;
+    uint32_t value_size = 0;
+    uint32_t client_id = 0;
+    std::string op;
+    uint32_t ttl = 0;
+  };
+
+  bool ParseTwitterTraceLine(const std::string& line, TwitterTraceRecord* rec) {
+    // Expected format:
+    // timestamp,key,key_size,value_size,client_id,op,ttl
+    // Example:
+    // 0,yOfuQfwH...,44,26169,1,set,28800
+    if (line.empty()) {
+      return false;
+    }
+
+    std::vector<std::string> cols;
+    cols.reserve(7);
+
+    size_t start = 0;
+    while (true) {
+      size_t pos = line.find(',', start);
+      if (pos == std::string::npos) {
+        cols.emplace_back(line.substr(start));
+        break;
+      }
+      cols.emplace_back(line.substr(start, pos - start));
+      start = pos + 1;
+      if (cols.size() > 7) {
+        break;
+      }
+    }
+
+    if (cols.size() != 7) {
+      return false;
+    }
+
+    try {
+      rec->timestamp = static_cast<uint64_t>(std::stoull(cols[0]));
+      rec->key = cols[1];
+      rec->key_size = static_cast<uint32_t>(std::stoul(cols[2]));
+      rec->value_size = static_cast<uint32_t>(std::stoul(cols[3]));
+      rec->client_id = static_cast<uint32_t>(std::stoul(cols[4]));
+      rec->op = cols[5];
+      rec->ttl = static_cast<uint32_t>(std::stoul(cols[6]));
+    } catch (...) {
+      return false;
+    }
+
+    return true;
+  }
 
   class ErrorHandlerListener : public EventListener {
    public:
@@ -2934,8 +2944,8 @@ class Benchmark {
                             const Slice& input, std::string* compressed) {
     constexpr uint32_t compress_format_version = 2;
 
-    return OLD_CompressData(input, compression_info, compress_format_version,
-                            compressed);
+    return CompressData(input, compression_info, compress_format_version,
+                        compressed);
   }
 
   void PrintHeader(const Options& options) {
@@ -2977,23 +2987,16 @@ class Benchmark {
       fprintf(stderr, "Running in NUMA enabled mode.\n");
 #ifndef NUMA
       fprintf(stderr, "NUMA is not defined in the system.\n");
-      db_bench_exit(1);
+      exit(1);
 #else
       if (numa_available() == -1) {
         fprintf(stderr, "NUMA is not supported by the system.\n");
-        db_bench_exit(1);
+        exit(1);
       }
 #endif
     }
-    // mixed compression  manager expect compression type to be expliciltiy
-    // configured through Options to be zstd
-    auto compression = std::string("zstd");
-    if (!strcasecmp(FLAGS_compression_manager.c_str(), "none")) {
-      compression = CompressionTypeToString(FLAGS_compression_type_e);
-    } else {
-      fprintf(stdout, "Compression manager: %s\n",
-              FLAGS_compression_manager.c_str());
-    }
+
+    auto compression = CompressionTypeToString(FLAGS_compression_type_e);
     fprintf(stdout, "Compression: %s\n", compression.c_str());
     fprintf(stdout, "Compression sampling rate: %" PRId64 "\n",
             FLAGS_sample_for_compression);
@@ -3025,7 +3028,8 @@ class Benchmark {
       CompressionOptions opts;
       CompressionContext context(FLAGS_compression_type_e, opts);
       CompressionInfo info(opts, context, CompressionDict::GetEmptyDict(),
-                           FLAGS_compression_type_e);
+                           FLAGS_compression_type_e,
+                           FLAGS_sample_for_compression);
       bool result = CompressSlice(info, Slice(input_str), &compressed);
 
       if (!result) {
@@ -3183,14 +3187,14 @@ class Benchmark {
       JemallocAllocatorOptions jemalloc_options;
       if (!NewJemallocNodumpAllocator(jemalloc_options, &allocator).ok()) {
         fprintf(stderr, "JemallocNodumpAllocator not supported.\n");
-        db_bench_exit(1);
+        exit(1);
       }
     } else if (FLAGS_use_cache_memkind_kmem_allocator) {
 #ifdef MEMKIND
       allocator = std::make_shared<MemkindKmemAllocator>();
 #else
       fprintf(stderr, "Memkind library is not linked with the binary.\n");
-      db_bench_exit(1);
+      exit(1);
 #endif
     }
 
@@ -3234,7 +3238,7 @@ class Benchmark {
             stderr,
             "Cannot specify both --secondary_cache_uri and "
             "--use_compressed_secondary_cache when using a non-tiered cache\n");
-        db_bench_exit(1);
+        exit(1);
       }
       Status s = SecondaryCache::CreateFromString(
           ConfigOptions(), FLAGS_secondary_cache_uri, &secondary_cache);
@@ -3242,7 +3246,7 @@ class Benchmark {
         fprintf(stderr,
                 "No secondary cache registered matching string: %s status=%s\n",
                 FLAGS_secondary_cache_uri.c_str(), s.ToString().c_str());
-        db_bench_exit(1);
+        exit(1);
       }
     }
 
@@ -3253,21 +3257,21 @@ class Benchmark {
       if (block_cache == nullptr) {
         fprintf(stderr, "No  cache registered matching string: %s status=%s\n",
                 FLAGS_cache_uri.c_str(), s.ToString().c_str());
-        db_bench_exit(1);
+        exit(1);
       }
     } else if (FLAGS_cache_type == "clock_cache") {
       fprintf(stderr, "Old clock cache implementation has been removed.\n");
-      db_bench_exit(1);
+      exit(1);
     } else if (EndsWith(FLAGS_cache_type, "hyper_clock_cache")) {
       size_t estimated_entry_charge;
-      if (FLAGS_cache_type == "fixed_hyper_clock_cache") {
+      if (FLAGS_cache_type == "fixed_hyper_clock_cache" ||
+          FLAGS_cache_type == "hyper_clock_cache") {
         estimated_entry_charge = FLAGS_block_size;
-      } else if (FLAGS_cache_type == "auto_hyper_clock_cache" ||
-                 FLAGS_cache_type == "hyper_clock_cache") {
+      } else if (FLAGS_cache_type == "auto_hyper_clock_cache") {
         estimated_entry_charge = 0;
       } else {
         fprintf(stderr, "Cache type not supported.");
-        db_bench_exit(1);
+        exit(1);
       }
       HyperClockCacheOptions opts(FLAGS_cache_size, estimated_entry_charge,
                                   FLAGS_cache_numshardbits);
@@ -3323,12 +3327,12 @@ class Benchmark {
       }
     } else {
       fprintf(stderr, "Cache type not supported.");
-      db_bench_exit(1);
+      exit(1);
     }
 
     if (!block_cache) {
       fprintf(stderr, "Unable to allocate block cache\n");
-      db_bench_exit(1);
+      exit(1);
     }
     return block_cache;
   }
@@ -3342,6 +3346,7 @@ class Benchmark {
                               : nullptr),
         num_(FLAGS_num),
         key_size_(FLAGS_key_size),
+        value_size_(FLAGS_value_size),
         user_timestamp_size_(FLAGS_user_timestamp_size),
         prefix_size_(FLAGS_prefix_size),
         total_thread_count_(0),
@@ -3376,7 +3381,7 @@ class Benchmark {
 
     if (FLAGS_prefix_size > FLAGS_key_size) {
       fprintf(stderr, "prefix size is larger than key size");
-      db_bench_exit(1);
+      exit(1);
     }
 
     std::vector<std::string> files;
@@ -3526,7 +3531,7 @@ class Benchmark {
     auto s = DB::OpenForReadOnly(open_options_, truth_db_name, &truth_db.db);
     if (!s.ok()) {
       fprintf(stderr, "open error: %s\n", s.ToString().c_str());
-      db_bench_exit(1);
+      exit(1);
     }
     ReadOptions ro;
     ro.total_order_seek = true;
@@ -3556,24 +3561,26 @@ class Benchmark {
 
   void ErrorExit() {
     DeleteDBs();
-    db_bench_exit(1);
+    exit(1);
   }
 
-  void Run(ToolHooks& hooks) {
+  void Run() {
     if (!SanityCheck()) {
       ErrorExit();
     }
-    Open(&open_options_, hooks);
+    Open(&open_options_);
     PrintHeader(open_options_);
     std::stringstream benchmark_stream(FLAGS_benchmarks);
     std::string name;
     std::unique_ptr<ExpiredTimeFilter> filter;
+    // Lee: db_bench param init
     while (std::getline(benchmark_stream, name, ',')) {
       // Sanitize parameters
       num_ = FLAGS_num;
       reads_ = (FLAGS_reads < 0 ? FLAGS_num : FLAGS_reads);
       writes_ = (FLAGS_writes < 0 ? FLAGS_num : FLAGS_writes);
       deletes_ = (FLAGS_deletes < 0 ? FLAGS_num : FLAGS_deletes);
+      value_size_ = FLAGS_value_size;
       value_size = FLAGS_value_size;
       key_size_ = FLAGS_key_size;
       entries_per_batch_ = FLAGS_batch_size;
@@ -3600,8 +3607,6 @@ class Benchmark {
       read_options_.async_io = FLAGS_async_io;
       read_options_.optimize_multiget_for_io = FLAGS_optimize_multiget_for_io;
       read_options_.auto_readahead_size = FLAGS_auto_readahead_size;
-      read_options_.auto_refresh_iterator_with_snapshot =
-          FLAGS_auto_refresh_iterator_with_snapshot;
 
       void (Benchmark::*method)(ThreadState*) = nullptr;
       void (Benchmark::*post_process_method)() = nullptr;
@@ -3722,12 +3727,6 @@ class Benchmark {
         fprintf(stderr, "entries_per_batch = %" PRIi64 "\n",
                 entries_per_batch_);
         method = &Benchmark::MultiReadRandom;
-      } else if (name == "multiscan") {
-        fprintf(stderr, "multiscan_stride = %" PRIi64 "\n",
-                FLAGS_multiscan_stride);
-        fprintf(stderr, "multiscan_size = %" PRIi64 "\n", FLAGS_multiscan_size);
-        fprintf(stderr, "seek_nexts = %" PRIi32 "\n", FLAGS_seek_nexts);
-        method = &Benchmark::MultiScan;
       } else if (name == "multireadwhilewriting") {
         fprintf(stderr, "entries_per_batch = %" PRIi64 "\n",
                 entries_per_batch_);
@@ -3746,6 +3745,30 @@ class Benchmark {
         method = &Benchmark::ReadRandom;
       } else if (name == "newiterator") {
         method = &Benchmark::IteratorCreation;
+      } else if (name == "testzipf") {
+        method = &Benchmark::Zipf;
+      } else if (name == "testlatestgenerator") {
+        method = &Benchmark::LatestGenerator;
+      } else if (name == "ycsbwklda") {
+        method = &Benchmark::YCSBWorkloadA;
+      } else if (name == "useCustom") {
+        method = &Benchmark::UseCustom;
+      } else if (name == "ycsbwkldb") {
+        method = &Benchmark::YCSBWorkloadB;
+      } else if (name == "ycsbwkldc") {
+        method = &Benchmark::YCSBWorkloadC;
+      } else if (name == "ycsbwkldd") {
+        method = &Benchmark::YCSBWorkloadD;
+      } else if (name == "ycsbwklde") {
+        method = &Benchmark::YCSBWorkloadE;
+      } else if (name == "ycsbwkldf") {
+        method = &Benchmark::YCSBWorkloadF;
+      } else if (name == "fillzip") {
+        method = &Benchmark::YCSBWorkloadW;
+      } else if (name == "fillstep") {
+        method = &Benchmark::FillStep;
+      } else if (name == "onekeyw") {
+        method = &Benchmark::OneKeyWrite;
       } else if (name == "newiteratorwhilewriting") {
         num_threads++;  // Add extra thread for writing
         method = &Benchmark::IteratorCreationWhileWriting;
@@ -3792,7 +3815,7 @@ class Benchmark {
         if (FLAGS_merge_operator.empty()) {
           fprintf(stdout, "%-12s : skipped (--merge_operator is unknown)\n",
                   name.c_str());
-          db_bench_exit(1);
+          exit(1);
         }
         method = &Benchmark::MergeRandom;
       } else if (name == "randomwithverify") {
@@ -3875,6 +3898,18 @@ class Benchmark {
           ErrorExit();
         }
         method = &Benchmark::Replay;
+      } else if (name == "twittertrace") {
+        if (num_threads > 1) {
+          fprintf(stderr, "twittertrace currently supports only 1 thread\n");
+          ErrorExit();
+        }
+        if (FLAGS_twitter_trace_file.empty()) {
+          fprintf(
+              stderr,
+              "Please set --twitter_trace_file to the Twitter trace path\n");
+          ErrorExit();
+        }
+        method = &Benchmark::TwitterTrace;
       } else if (name == "getmergeoperands") {
         method = &Benchmark::GetMergeOperands;
       } else if (name == "verifychecksum") {
@@ -3888,9 +3923,6 @@ class Benchmark {
         method = &Benchmark::Backup;
       } else if (name == "restore") {
         method = &Benchmark::Restore;
-      } else if (name == "openandcompact") {
-        fresh_db = false;
-        method = &Benchmark::OpenAndCompact;
       } else if (!name.empty()) {  // No error message for empty name
         fprintf(stderr, "unknown benchmark '%s'\n", name.c_str());
         ErrorExit();
@@ -3916,7 +3948,7 @@ class Benchmark {
           }
           multi_dbs_.clear();
         }
-        Open(&open_options_, hooks);  // use open_options for the last accessed
+        Open(&open_options_);  // use open_options for the last accessed
       }
 
       if (method != nullptr) {
@@ -4239,7 +4271,7 @@ class Benchmark {
       thread->stats.FinishedOps(nullptr, nullptr, 1, kOthers);
     }
     if (ptr == nullptr) {
-      db_bench_exit(1);  // Disable unused variable warning.
+      exit(1);  // Disable unused variable warning.
     }
   }
 
@@ -4254,7 +4286,8 @@ class Benchmark {
     opts.level = FLAGS_compression_level;
     CompressionContext context(FLAGS_compression_type_e, opts);
     CompressionInfo info(opts, context, CompressionDict::GetEmptyDict(),
-                         FLAGS_compression_type_e);
+                         FLAGS_compression_type_e,
+                         FLAGS_sample_for_compression);
     // Compress 1G
     while (ok && bytes < int64_t(1) << 30) {
       compressed.clear();
@@ -4284,9 +4317,9 @@ class Benchmark {
     compression_opts.level = FLAGS_compression_level;
     CompressionContext compression_ctx(FLAGS_compression_type_e,
                                        compression_opts);
-    CompressionInfo compression_info(compression_opts, compression_ctx,
-                                     CompressionDict::GetEmptyDict(),
-                                     FLAGS_compression_type_e);
+    CompressionInfo compression_info(
+        compression_opts, compression_ctx, CompressionDict::GetEmptyDict(),
+        FLAGS_compression_type_e, FLAGS_sample_for_compression);
     UncompressionContext uncompression_ctx(FLAGS_compression_type_e);
     UncompressionInfo uncompression_info(uncompression_ctx,
                                          UncompressionDict::GetEmptyDict(),
@@ -4298,7 +4331,7 @@ class Benchmark {
     while (ok && bytes < 1024 * 1048576) {
       constexpr uint32_t compress_format_version = 2;
 
-      CacheAllocationPtr uncompressed = OLD_UncompressData(
+      CacheAllocationPtr uncompressed = UncompressData(
           uncompression_info, compressed.data(), compressed.size(),
           &uncompressed_size, compress_format_version);
 
@@ -4334,7 +4367,7 @@ class Benchmark {
       }
       fprintf(stderr, "Unable to load options file %s --- %s\n",
               FLAGS_options_file.c_str(), s.ToString().c_str());
-      db_bench_exit(1);
+      exit(1);
     }
     return false;
   }
@@ -4347,6 +4380,7 @@ class Benchmark {
 
     assert(db_.db == nullptr);
 
+    options.enable_memtable_logging = FLAGS_enable_memtable_logging;
     options.env = FLAGS_env;
     options.wal_dir = FLAGS_wal_dir;
     options.dump_malloc_stats = FLAGS_dump_malloc_stats;
@@ -4358,7 +4392,6 @@ class Benchmark {
     options.stats_history_buffer_size =
         static_cast<size_t>(FLAGS_stats_history_buffer_size);
     options.avoid_flush_during_recovery = FLAGS_avoid_flush_during_recovery;
-    options.avoid_flush_during_shutdown = FLAGS_avoid_flush_during_shutdown;
 
     options.compression_opts.level = FLAGS_compression_level;
     options.compression_opts.max_dict_bytes = FLAGS_compression_max_dict_bytes;
@@ -4376,13 +4409,13 @@ class Benchmark {
       options.write_buffer_manager.reset(
           new WriteBufferManager(FLAGS_db_write_buffer_size, cache_));
     }
-    options.max_manifest_file_size = FLAGS_max_manifest_file_size;
-    options.max_manifest_space_amp_pct = FLAGS_max_manifest_space_amp_pct;
     options.arena_block_size = FLAGS_arena_block_size;
     options.write_buffer_size = FLAGS_write_buffer_size;
     options.max_write_buffer_number = FLAGS_max_write_buffer_number;
     options.min_write_buffer_number_to_merge =
         FLAGS_min_write_buffer_number_to_merge;
+    options.max_write_buffer_number_to_maintain =
+        FLAGS_max_write_buffer_number_to_maintain;
     options.max_write_buffer_size_to_maintain =
         FLAGS_max_write_buffer_size_to_maintain;
     options.max_background_jobs = FLAGS_max_background_jobs;
@@ -4408,7 +4441,7 @@ class Benchmark {
       options.comparator = test::Uint64Comparator();
       if (FLAGS_key_size != 8) {
         fprintf(stderr, "Using Uint64 comparator but key size is not 8.\n");
-        db_bench_exit(1);
+        exit(1);
       }
     }
     if (FLAGS_use_stderr_info_logger) {
@@ -4426,6 +4459,7 @@ class Benchmark {
     options.max_file_opening_threads = FLAGS_file_opening_threads;
     options.compaction_readahead_size = FLAGS_compaction_readahead_size;
     options.log_readahead_size = FLAGS_log_readahead_size;
+    options.random_access_max_buffer_size = FLAGS_random_access_max_buffer_size;
     options.writable_file_max_buffer_size = FLAGS_writable_file_max_buffer_size;
     options.use_fsync = FLAGS_use_fsync;
     options.num_levels = FLAGS_num_levels;
@@ -4442,14 +4476,14 @@ class Benchmark {
     if (!s.ok()) {
       fprintf(stderr, "Could not create memtable factory: %s\n",
               s.ToString().c_str());
-      db_bench_exit(1);
+      exit(1);
     } else if ((FLAGS_prefix_size == 0) &&
                (options.memtable_factory->IsInstanceOf("prefix_hash") ||
                 options.memtable_factory->IsInstanceOf("hash_linkedlist"))) {
       fprintf(stderr,
               "prefix_size should be non-zero if PrefixHash or "
               "HashLinkedList memtablerep is used\n");
-      db_bench_exit(1);
+      exit(1);
     }
     if (FLAGS_use_plain_table) {
       if (!options.memtable_factory->IsInstanceOf("prefix_hash") &&
@@ -4472,12 +4506,12 @@ class Benchmark {
     } else if (FLAGS_use_cuckoo_table) {
       if (FLAGS_cuckoo_hash_ratio > 1 || FLAGS_cuckoo_hash_ratio < 0) {
         fprintf(stderr, "Invalid cuckoo_hash_ratio\n");
-        db_bench_exit(1);
+        exit(1);
       }
 
       if (!FLAGS_mmap_read) {
         fprintf(stderr, "cuckoo table format requires mmap read to operate\n");
-        db_bench_exit(1);
+        exit(1);
       }
 
       ROCKSDB_NAMESPACE::CuckooTableOptions table_options;
@@ -4493,7 +4527,7 @@ class Benchmark {
         if (FLAGS_prefix_size == 0) {
           fprintf(stderr,
                   "prefix_size not assigned when enable use_hash_search \n");
-          db_bench_exit(1);
+          exit(1);
         }
         block_based_options.index_type = BlockBasedTableOptions::kHashSearch;
       } else {
@@ -4592,7 +4626,6 @@ class Benchmark {
       block_based_options.block_restart_interval = FLAGS_block_restart_interval;
       block_based_options.index_block_restart_interval =
           FLAGS_index_block_restart_interval;
-      TEST_AllowUnsupportedFormatVersion() = true;
       block_based_options.format_version =
           static_cast<uint32_t>(FLAGS_format_version);
       block_based_options.read_amp_bytes_per_bit = FLAGS_read_amp_bytes_per_bit;
@@ -4606,7 +4639,6 @@ class Benchmark {
           FLAGS_initial_auto_readahead_size;
       block_based_options.num_file_reads_for_auto_readahead =
           FLAGS_num_file_reads_for_auto_readahead;
-      block_based_options.verify_compression = FLAGS_verify_compression;
       BlockBasedTableOptions::PrepopulateBlockCache prepopulate_block_cache =
           block_based_options.prepopulate_block_cache;
       switch (FLAGS_prepopulate_block_cache) {
@@ -4661,7 +4693,7 @@ class Benchmark {
         if (!rc_status.ok()) {
           fprintf(stderr, "Error initializing read cache, %s\n",
                   rc_status.ToString().c_str());
-          db_bench_exit(1);
+          exit(1);
         }
       }
 
@@ -4681,7 +4713,7 @@ class Benchmark {
                 stderr,
                 "Unable to create a standalone blob cache if blob_cache_size "
                 "<= 0.\n");
-            db_bench_exit(1);
+            exit(1);
           }
         }
         switch (FLAGS_prepopulate_blob_cache) {
@@ -4693,7 +4725,7 @@ class Benchmark {
             break;
           default:
             fprintf(stderr, "Unknown prepopulate blob cache mode\n");
-            db_bench_exit(1);
+            exit(1);
         }
 
         fprintf(stdout,
@@ -4721,7 +4753,7 @@ class Benchmark {
         fprintf(stderr, "Insufficient number of fanouts specified %d\n",
                 static_cast<int>(
                     FLAGS_max_bytes_for_level_multiplier_additional_v.size()));
-        db_bench_exit(1);
+        exit(1);
       }
       options.max_bytes_for_level_multiplier_additional =
           FLAGS_max_bytes_for_level_multiplier_additional_v;
@@ -4732,34 +4764,6 @@ class Benchmark {
     options.level0_slowdown_writes_trigger =
         FLAGS_level0_slowdown_writes_trigger;
     options.compression = FLAGS_compression_type_e;
-    std::shared_ptr<CompressionManagerWrapper> mgr = nullptr;
-    if (!strcasecmp(FLAGS_compression_manager.c_str(), "mixed")) {
-      mgr =
-          std::make_shared<RoundRobinManager>(GetBuiltinV2CompressionManager());
-    } else if (!strcasecmp(FLAGS_compression_manager.c_str(),
-                           "costpredictor")) {
-      mgr = CreateCostAwareCompressionManager();
-    } else if (!strcasecmp(FLAGS_compression_manager.c_str(), "autoskip")) {
-      mgr = CreateAutoSkipCompressionManager();
-    } else if (!strcasecmp(FLAGS_compression_manager.c_str(), "none")) {
-      options.compression = FLAGS_compression_type_e;
-    } else {
-      // compression manager is not supported
-      // exit with error
-      fprintf(stderr, "Requested compression manager not supported");
-      ErrorExit();
-    }
-    if (FLAGS_compression_type_e == kNoCompression &&
-        strcasecmp(FLAGS_compression_manager.c_str(), "none")) {
-      fprintf(stderr,
-              "Compression type must not be no Compression when using "
-              "compression manager");
-      ErrorExit();
-    }
-    if (mgr != nullptr) {
-      options.compression_manager = mgr;
-    }
-
     if (FLAGS_simulate_hybrid_fs_file != "") {
       options.last_level_temperature = Temperature::kWarm;
     }
@@ -4820,7 +4824,7 @@ class Benchmark {
       if (!s.ok()) {
         fprintf(stderr, "invalid merge operator[%s]: %s\n",
                 FLAGS_merge_operator.c_str(), s.ToString().c_str());
-        db_bench_exit(1);
+        exit(1);
       }
     }
     options.max_successive_merges = FLAGS_max_successive_merges;
@@ -4863,7 +4867,7 @@ class Benchmark {
     if (FLAGS_user_timestamp_size > 0) {
       if (FLAGS_user_timestamp_size != 8) {
         fprintf(stderr, "Only 64 bits timestamps are supported.\n");
-        db_bench_exit(1);
+        exit(1);
       }
       options.comparator = test::BytewiseComparatorWithU64TsWrapper();
     }
@@ -4871,7 +4875,6 @@ class Benchmark {
     options.allow_data_in_errors = FLAGS_allow_data_in_errors;
     options.track_and_verify_wals_in_manifest =
         FLAGS_track_and_verify_wals_in_manifest;
-    options.track_and_verify_wals = FLAGS_track_and_verify_wals;
 
     // Integrated BlobDB
     options.enable_blob_files = FLAGS_enable_blob_files;
@@ -4891,27 +4894,21 @@ class Benchmark {
 
     if (FLAGS_readonly && FLAGS_transaction_db) {
       fprintf(stderr, "Cannot use readonly flag with transaction_db\n");
-      db_bench_exit(1);
+      exit(1);
     }
     if (FLAGS_use_secondary_db &&
         (FLAGS_transaction_db || FLAGS_optimistic_transaction_db)) {
       fprintf(stderr, "Cannot use use_secondary_db flag with transaction_db\n");
-      db_bench_exit(1);
+      exit(1);
     }
     options.memtable_protection_bytes_per_key =
         FLAGS_memtable_protection_bytes_per_key;
     options.block_protection_bytes_per_key =
         FLAGS_block_protection_bytes_per_key;
     options.paranoid_memory_checks = FLAGS_paranoid_memory_checks;
-    options.memtable_veirfy_per_key_checksum_on_seek =
-        FLAGS_memtable_veirfy_per_key_checksum_on_seek;
-    options.memtable_op_scan_flush_trigger =
-        FLAGS_memtable_op_scan_flush_trigger;
-    options.compaction_options_universal.reduce_file_locking =
-        FLAGS_universal_reduce_file_locking;
   }
 
-  void InitializeOptionsGeneral(Options* opts, ToolHooks& hooks) {
+  void InitializeOptionsGeneral(Options* opts) {
     // Be careful about what is set here to avoid accidentally overwriting
     // settings already configured by OPTIONS file. Only configure settings that
     // are needed for the benchmark to run, settings for shared objects that
@@ -5004,7 +5001,7 @@ class Benchmark {
     }
 
     if (FLAGS_num_multi_db <= 1) {
-      OpenDb(options, hooks, FLAGS_db, &db_);
+      OpenDb(options, FLAGS_db, &db_);
     } else {
       multi_dbs_.clear();
       multi_dbs_.resize(FLAGS_num_multi_db);
@@ -5013,7 +5010,7 @@ class Benchmark {
         if (!wal_dir.empty()) {
           options.wal_dir = GetPathForMultiple(wal_dir, i);
         }
-        OpenDb(options, hooks, GetPathForMultiple(FLAGS_db, i), &multi_dbs_[i]);
+        OpenDb(options, GetPathForMultiple(FLAGS_db, i), &multi_dbs_[i]);
       }
       options.wal_dir = wal_dir;
     }
@@ -5040,15 +5037,15 @@ class Benchmark {
     }
   }
 
-  void Open(Options* opts, ToolHooks& hooks) {
+  void Open(Options* opts) {
     if (!InitializeOptionsFromFile(opts)) {
       InitializeOptionsFromFlags(opts);
     }
 
-    InitializeOptionsGeneral(opts, hooks);
+    InitializeOptionsGeneral(opts);
   }
 
-  void OpenDb(Options options, ToolHooks& hooks, const std::string& db_name,
+  void OpenDb(Options options, const std::string& db_name,
               DBWithColumnFamilies* db) {
     uint64_t open_start = FLAGS_report_open_timing ? FLAGS_env->NowNanos() : 0;
     Status s;
@@ -5077,7 +5074,7 @@ class Benchmark {
         }
         if (sum != 100) {
           fprintf(stderr, "column_family_distribution items must sum to 100\n");
-          db_bench_exit(1);
+          exit(1);
         }
         if (cfh_idx_to_prob.size() != num_hot) {
           fprintf(stderr,
@@ -5085,15 +5082,15 @@ class Benchmark {
                   " column_family_distribution items; expected "
                   "%" ROCKSDB_PRIszt "\n",
                   cfh_idx_to_prob.size(), num_hot);
-          db_bench_exit(1);
+          exit(1);
         }
       }
       if (FLAGS_readonly) {
-        s = hooks.OpenForReadOnly(options, db_name, column_families, &db->cfh,
-                                  &db->db);
+        s = DB::OpenForReadOnly(options, db_name, column_families, &db->cfh,
+                                &db->db);
       } else if (FLAGS_optimistic_transaction_db) {
-        s = hooks.OpenOptimisticTransactionDB(options, db_name, column_families,
-                                              &db->cfh, &db->opt_txn_db);
+        s = OptimisticTransactionDB::Open(options, db_name, column_families,
+                                          &db->cfh, &db->opt_txn_db);
         if (s.ok()) {
           db->db = db->opt_txn_db->GetBaseDB();
         }
@@ -5105,22 +5102,22 @@ class Benchmark {
           txn_db_options.skip_concurrency_control = true;
           txn_db_options.write_policy = WRITE_PREPARED;
         }
-        s = hooks.OpenTransactionDB(options, txn_db_options, db_name,
-                                    column_families, &db->cfh, &ptr);
+        s = TransactionDB::Open(options, txn_db_options, db_name,
+                                column_families, &db->cfh, &ptr);
         if (s.ok()) {
           db->db = ptr;
         }
       } else {
-        s = hooks.Open(options, db_name, column_families, &db->cfh, &db->db);
+        s = DB::Open(options, db_name, column_families, &db->cfh, &db->db);
       }
       db->cfh.resize(FLAGS_num_column_families);
       db->num_created = num_hot;
       db->num_hot = num_hot;
       db->cfh_idx_to_prob = std::move(cfh_idx_to_prob);
     } else if (FLAGS_readonly) {
-      s = hooks.OpenForReadOnly(options, db_name, &db->db, false);
+      s = DB::OpenForReadOnly(options, db_name, &db->db);
     } else if (FLAGS_optimistic_transaction_db) {
-      s = hooks.OpenOptimisticTransactionDB(options, db_name, &db->opt_txn_db);
+      s = OptimisticTransactionDB::Open(options, db_name, &db->opt_txn_db);
       if (s.ok()) {
         db->db = db->opt_txn_db->GetBaseDB();
       }
@@ -5134,7 +5131,7 @@ class Benchmark {
       }
       s = CreateLoggerFromOptions(db_name, options, &options.info_log);
       if (s.ok()) {
-        s = hooks.OpenTransactionDB(options, txn_db_options, db_name, &ptr);
+        s = TransactionDB::Open(options, txn_db_options, db_name, &ptr);
       }
       if (s.ok()) {
         db->db = ptr;
@@ -5152,7 +5149,7 @@ class Benchmark {
       blob_db_options.blob_file_size = FLAGS_blob_db_file_size;
       blob_db_options.compression = FLAGS_blob_db_compression_type_e;
       blob_db::BlobDB* ptr = nullptr;
-      s = hooks.Open(options, blob_db_options, db_name, &ptr);
+      s = blob_db::BlobDB::Open(options, blob_db_options, db_name, &ptr);
       if (s.ok()) {
         db->db = ptr;
       }
@@ -5163,8 +5160,7 @@ class Benchmark {
         default_secondary_path += "/dbbench_secondary";
         FLAGS_secondary_path = default_secondary_path;
       }
-      s = hooks.OpenAsSecondary(options, db_name, FLAGS_secondary_path,
-                                &db->db);
+      s = DB::OpenAsSecondary(options, db_name, FLAGS_secondary_path, &db->db);
       if (s.ok() && FLAGS_secondary_update_interval > 0) {
         secondary_update_thread_.reset(new port::Thread(
             [this](int interval, DBWithColumnFamilies* _db) {
@@ -5185,12 +5181,12 @@ class Benchmark {
       }
     } else if (FLAGS_open_as_follower) {
       std::unique_ptr<DB> dbptr;
-      s = hooks.OpenAsFollower(options, db_name, FLAGS_leader_path, &dbptr);
+      s = DB::OpenAsFollower(options, db_name, FLAGS_leader_path, &dbptr);
       if (s.ok()) {
         db->db = dbptr.release();
       }
     } else {
-      s = hooks.Open(options, db_name, &db->db);
+      s = DB::Open(options, db_name, &db->db);
     }
     if (FLAGS_report_open_timing) {
       std::cout << "OpenDb:     "
@@ -5199,7 +5195,7 @@ class Benchmark {
     }
     if (!s.ok()) {
       fprintf(stderr, "open error: %s\n", s.ToString().c_str());
-      db_bench_exit(1);
+      exit(1);
     }
   }
 
@@ -5220,206 +5216,6 @@ class Benchmark {
 
   void WriteUniqueRandom(ThreadState* thread) {
     DoWrite(thread, UNIQUE_RANDOM);
-  }
-
-  void OpenAndCompact(ThreadState* thread) {
-    if (thread->tid != 0) {
-      return;
-    }
-
-    int current_run = ++openandcompact_run_counter;
-    bool is_odd_run = (current_run % 2 == 1);
-
-    if (FLAGS_openandcompact_test_cancel_on_odd) {
-      const char* even_description = FLAGS_openandcompact_allow_resumption
-                                         ? "even - resume"
-                                         : "even - normal";
-      fprintf(stdout, "\n--- Run %d (%s) ---\n", current_run,
-              is_odd_run ? "odd - will cancel" : even_description);
-    }
-
-    Status create_status =
-        db_.db->GetEnv()->CreateDirIfMissing(FLAGS_secondary_path);
-    if (!create_status.ok()) {
-      fprintf(stderr, "Failed to create secondary path: %s\n",
-              create_status.ToString().c_str());
-      return;
-    }
-
-    std::string options_file;
-    Status options_status =
-        GetLatestOptionsFileName(FLAGS_db, db_.db->GetEnv(), &options_file);
-    if (!options_status.ok()) {
-      fprintf(stderr, "FAILED: Cannot find OPTIONS file in %s: %s\n",
-              FLAGS_db.c_str(), options_status.ToString().c_str());
-      return;
-    }
-
-    uint64_t options_file_number;
-    FileType type;
-    if (!ParseFileName(options_file, &options_file_number, &type) ||
-        type != kOptionsFile) {
-      fprintf(stderr, "FAILED: Cannot parse OPTIONS file number from %s\n",
-              options_file.c_str());
-      return;
-    }
-
-    CompactionServiceInput compaction_input;
-    compaction_input.cf_name = kDefaultColumnFamilyName;
-
-    std::vector<std::string> input_file_names;
-    ColumnFamilyMetaData cf_meta;
-    db_.db->GetColumnFamilyMetaData(&cf_meta);
-
-    uint64_t total_input_keys = 0;
-    uint64_t total_input_files = 0;
-
-    // Collect files from all levels for full compaction
-    for (const auto& level : cf_meta.levels) {
-      for (const auto& file : level.files) {
-        input_file_names.push_back(file.name);
-        total_input_keys += file.num_entries;
-        total_input_files++;
-      }
-    }
-
-    // Set output level to configured bottom level (num_levels - 1)
-    compaction_input.output_level = FLAGS_num_levels - 1;
-    compaction_input.db_id = "db_bench_openandcompact";
-    compaction_input.options_file_number = options_file_number;
-
-    compaction_input.input_files = input_file_names;
-
-    std::string input_string;
-    Status serialize_status = compaction_input.Write(&input_string);
-    if (!serialize_status.ok()) {
-      fprintf(stderr, "FAILED: Cannot serialize compaction input: %s\n",
-              serialize_status.ToString().c_str());
-      return;
-    }
-
-    fprintf(stdout, "\nInput files: %" PRIu64 " files, %" PRIu64 " keys\n",
-            total_input_files, total_input_keys);
-
-    std::string output_directory =
-        FLAGS_secondary_path + "/openandcompact_" + std::to_string(thread->tid);
-
-    // Always clean up in odd run, depending on
-    // !FLAGS_openandcompact_allow_resumption in even run
-    bool should_cleanup = is_odd_run || !FLAGS_openandcompact_allow_resumption;
-
-    if (should_cleanup) {
-      std::vector<std::string> children;
-      Status list_status = FLAGS_env->GetChildren(output_directory, &children);
-      if (list_status.ok()) {
-        for (const auto& child : children) {
-          if (child != "." && child != "..") {
-            std::string child_path = output_directory + "/" + child;
-            Status del_status = FLAGS_env->DeleteFile(child_path);
-            if (!del_status.ok()) {
-              fprintf(stderr, "Warning: Failed to delete file %s: %s\n",
-                      child_path.c_str(), del_status.ToString().c_str());
-            }
-          }
-        }
-        Status del_dir_status = FLAGS_env->DeleteDir(output_directory);
-        if (!del_dir_status.ok()) {
-          fprintf(stderr, "Warning: Failed to delete directory %s: %s\n",
-                  output_directory.c_str(), del_dir_status.ToString().c_str());
-        }
-      }
-    }
-
-    Status create_output_status =
-        FLAGS_env->CreateDirIfMissing(output_directory);
-    if (!create_output_status.ok()) {
-      fprintf(stderr, "Failed to create output directory %s: %s\n",
-              output_directory.c_str(),
-              create_output_status.ToString().c_str());
-      return;
-    }
-
-    std::string result_string;
-
-    CompactionServiceOptionsOverride options_override;
-    options_override.env = FLAGS_env;
-    BlockBasedTableOptions table_options;
-    options_override.table_factory.reset(
-        NewBlockBasedTableFactory(table_options));
-
-    OpenAndCompactOptions options;
-    std::atomic<bool> should_cancel{false};
-    options.canceled = &should_cancel;
-    options.allow_resumption = FLAGS_openandcompact_allow_resumption;
-
-    Status s;
-    uint64_t start_time = FLAGS_env->NowMicros();
-    uint64_t end_time = start_time;
-
-    if (FLAGS_openandcompact_test_cancel_on_odd && is_odd_run) {
-      std::thread compaction_thread([&]() {
-        s = DB::OpenAndCompact(options, FLAGS_db, output_directory,
-                               input_string, &result_string, options_override);
-        end_time = FLAGS_env->NowMicros();
-      });
-
-      std::thread cancellation_timer([&]() {
-        std::this_thread::sleep_for(std::chrono::milliseconds(
-            FLAGS_openandcompact_cancel_after_millseconds));
-        should_cancel.store(true);
-      });
-
-      compaction_thread.join();
-      cancellation_timer.join();
-    } else {
-      // Normal synchronous operation for even runs or when test_cancel_on_odd
-      // is false
-      s = DB::OpenAndCompact(options, FLAGS_db, output_directory, input_string,
-                             &result_string, options_override);
-      end_time = FLAGS_env->NowMicros();
-    }
-
-    uint64_t latency_micros = end_time - start_time;
-    double latency_seconds = latency_micros / 1000000.0;
-
-    fprintf(stdout,
-            "OpenAndCompact() API call : %.3f micros/op %.3f seconds/op\n",
-            (double)latency_micros, latency_seconds);
-
-    fprintf(stdout, "OpenAndCompact status: %s\n", s.ToString().c_str());
-
-    if (FLAGS_openandcompact_test_cancel_on_odd && is_odd_run) {
-      if (!s.IsManualCompactionPaused()) {
-        fprintf(stdout, "Fail to cancel compaction");
-      }
-      return;
-    } else if (!s.ok()) {
-      fprintf(stderr, "OpenAndCompact failed: %s\n", s.ToString().c_str());
-      return;
-    }
-
-    CompactionServiceResult compaction_result;
-    Status parse_status =
-        CompactionServiceResult::Read(result_string, &compaction_result);
-    if (parse_status.ok()) {
-      uint64_t total_output_size = 0;
-      for (const auto& output_file : compaction_result.output_files) {
-        total_output_size += output_file.file_size;
-      }
-
-      uint64_t num_output_files = compaction_result.output_files.size();
-      uint64_t avg_output_file_size =
-          num_output_files > 0 ? total_output_size / num_output_files : 0;
-
-      fprintf(stdout,
-              "Output: %" PRIu64 " files, average size: %" PRIu64
-              " bytes (%.2f MB)\n",
-              num_output_files, avg_output_file_size,
-              avg_output_file_size / (1024.0 * 1024.0));
-    } else {
-      fprintf(stderr, "Failed to parse compaction result: %s\n",
-              parse_status.ToString().c_str());
-    }
   }
 
   class KeyGenerator {
@@ -5998,7 +5794,7 @@ class Benchmark {
         if (sorted_runs[i].size() < num_levels - 1) {
           fprintf(stderr, "n is too small to fill %" ROCKSDB_PRIszt " levels\n",
                   num_levels);
-          db_bench_exit(1);
+          exit(1);
         }
       }
       for (size_t i = 0; i < num_db; i++) {
@@ -6053,7 +5849,7 @@ class Benchmark {
         if (sorted_runs[i].size() < num_levels) {
           fprintf(stderr, "n is too small to fill %" ROCKSDB_PRIszt " levels\n",
                   num_levels);
-          db_bench_exit(1);
+          exit(1);
         }
       }
       for (size_t i = 0; i < num_db; i++) {
@@ -6254,13 +6050,6 @@ class Benchmark {
     options.adaptive_readahead = FLAGS_adaptive_readahead;
     options.async_io = FLAGS_async_io;
     options.auto_readahead_size = FLAGS_auto_readahead_size;
-    std::unique_ptr<ManagedSnapshot> snapshot = nullptr;
-    if (FLAGS_explicit_snapshot) {
-      snapshot = std::make_unique<ManagedSnapshot>(db);
-      options.snapshot = snapshot->snapshot();
-    } else {
-      options.snapshot = nullptr;
-    }
 
     Iterator* iter = db->NewIterator(options);
     int64_t i = 0;
@@ -6660,75 +6449,6 @@ class Benchmark {
     snprintf(msg, sizeof(msg), "(%" PRIu64 " of %" PRIu64 " found)", found,
              read);
     thread->stats.AddBytes(bytes);
-    thread->stats.AddMessage(msg);
-  }
-
-  void MultiScan(ThreadState* thread) {
-    const int64_t scan_size = FLAGS_seek_nexts ? FLAGS_seek_nexts : 50;
-    const int64_t readahead =
-        FLAGS_readahead_size ? FLAGS_readahead_size : 1024 * 24;
-    const int64_t multiscan_size = FLAGS_multiscan_size;
-    auto count_hist = std::make_shared<HistogramImpl>();
-    ReadOptions options = read_options_;
-
-    int64_t multiscans_done = 0;
-
-    options.async_io = true;
-    options.readahead_size = readahead;
-
-    Duration duration(FLAGS_duration, reads_);
-    int64_t num_keys = 1;
-    while (!duration.Done(num_keys)) {
-      DB* db = SelectDB(thread);
-      MultiScanArgs opts(open_options_.comparator);
-      opts.io_coalesce_threshold = FLAGS_multiscan_coalesce_threshold;
-      opts.use_async_io = FLAGS_multiscan_use_async_io;
-      std::vector<std::unique_ptr<const char[]>> guards;
-      opts.reserve(multiscan_size);
-      // We create 1 random start, and then multiscan will start from that
-      // random start point And create a set of scans of `scan_size` in size
-      // with `multiscan_stride` space between each scan.
-      uint64_t range = static_cast<uint64_t>(FLAGS_num) -
-                       ((scan_size + FLAGS_multiscan_stride) * multiscan_size);
-      uint64_t start_key = thread->rand.Uniform(range);
-      for (int64_t i = 0; i < multiscan_size; i++) {
-        std::unique_ptr<const char[]> skey_guard;
-        Slice skey = AllocateKey(&skey_guard);
-        guards.push_back(std::move(skey_guard));
-        std::unique_ptr<const char[]> ekey_guard;
-        Slice ekey = AllocateKey(&ekey_guard);
-        guards.push_back(std::move(ekey_guard));
-
-        GenerateKeyFromInt(start_key, FLAGS_num, &skey);
-        uint64_t end_key = start_key + scan_size;
-        GenerateKeyFromInt(end_key, FLAGS_num, &ekey);
-
-        opts.insert(skey, ekey);
-        start_key += scan_size + FLAGS_multiscan_stride;
-      }
-
-      auto iter =
-          db->NewMultiScan(read_options_, db->DefaultColumnFamily(), opts);
-      int64_t keys = 0;
-      for (auto rng : *iter) {
-        for ([[maybe_unused]] auto it : rng) {
-          keys++;
-        }
-        assert(keys > 0);
-      }
-      num_keys = std::max<int64_t>(1, keys);
-
-      if (thread->shared->read_rate_limiter.get() != nullptr) {
-        thread->shared->read_rate_limiter->Request(
-            1, Env::IO_HIGH, nullptr /* stats */, RateLimiter::OpType::kRead);
-      }
-
-      thread->stats.FinishedOps(nullptr, db, 1, kMultiScan);
-      multiscans_done += 1;
-    }
-
-    char msg[100];
-    snprintf(msg, sizeof(msg), "(multscans:%" PRIu64 ")", multiscans_done);
     thread->stats.AddMessage(msg);
   }
 
@@ -7250,6 +6970,920 @@ class Benchmark {
       BGWriter(thread, kWrite);
     }
   }
+  void UseCustom(ThreadState* thread) {
+    ReadOptions options(FLAGS_verify_checksum, true);
+    RandomGenerator gen;
+    std::string value;
+    int64_t found = 0;
+
+    int64_t reads_done = 0;
+    int64_t writes_done = 0;
+    Duration duration(FLAGS_duration, 0);
+
+    std::unique_ptr<const char[]> key_guard;
+    Slice key = AllocateKey(&key_guard);
+
+    // the number of iterations is the larger of read_ or write_
+
+    // write in order
+    for (long k = 1; k <= FLAGS_num; k++) {
+      DB* db = SelectDB(thread);
+      GenerateKeyFromInt(k, FLAGS_num, &key);
+
+      // write
+      Status s = db->Put(write_options_, key, gen.Generate(value_size_));
+      if (!s.ok()) {
+        // fprintf(stderr, "put error: %s\n", s.ToString().c_str());
+        // exit(1);
+      }
+      writes_done++;
+      // printf("K= %d\n", k);
+      thread->stats.FinishedOps(nullptr, db, 1, kWrite);
+    }
+
+    char msg[100];
+    snprintf(msg, sizeof(msg),
+             "( reads:%" PRIu64 " writes:%" PRIu64 " total:%" PRIu64
+             " found:%" PRIu64 ")",
+             reads_done, writes_done, readwrites_, found);
+    thread->stats.AddMessage(msg);
+  }
+
+  void YCSBFillDB(ThreadState* thread) {
+    ReadOptions options(FLAGS_verify_checksum, true);
+    RandomGenerator gen;
+    std::string value;
+    int64_t found = 0;
+
+    int64_t reads_done = 0;
+    int64_t writes_done = 0;
+    Duration duration(FLAGS_duration, 0);
+
+    std::unique_ptr<const char[]> key_guard;
+    Slice key = AllocateKey(&key_guard);
+
+    // the number of iterations is the larger of read_ or write_
+
+    // write in order
+    for (long k = 1; k <= FLAGS_num; k++) {
+      DB* db = SelectDB(thread);
+      GenerateKeyFromInt(k, FLAGS_num, &key);
+
+      // write
+      Status s = db->Put(write_options_, key, gen.Generate(value_size_));
+      if (!s.ok()) {
+        // fprintf(stderr, "put error: %s\n", s.ToString().c_str());
+        // exit(1);
+      }
+      writes_done++;
+      // printf("K= %d\n", k);
+      thread->stats.FinishedOps(nullptr, db, 1, kWrite);
+    }
+
+    char msg[100];
+    snprintf(msg, sizeof(msg),
+             "( reads:%" PRIu64 " writes:%" PRIu64 " total:%" PRIu64
+             " found:%" PRIu64 ")",
+             reads_done, writes_done, readwrites_, found);
+    thread->stats.AddMessage(msg);
+  }
+
+  // Workload A: Update heavy workload
+  // This workload has a mix of 50/50 reads and writes.
+  // An application example is a session store recording recent actions.
+  // Read/update ratio: 50/50
+  // Default data size: 1 KB records
+  // Request distribution: zipfian
+  void YCSBWorkloadA(ThreadState* thread) {
+    ReadOptions options(FLAGS_verify_checksum, true);
+    RandomGenerator gen;
+    init_latestgen(FLAGS_num);
+    init_zipf_generator(0, FLAGS_num, bench_params.zipf_const);
+
+    std::string value;
+    int64_t found = 0;
+
+    int64_t reads_done = 0;
+    int64_t writes_done = 0;
+    int64_t nums = FLAGS_num;
+    Duration duration(FLAGS_duration, 0);
+
+    std::unique_ptr<const char[]> key_guard;
+    Slice key = AllocateKey(&key_guard);
+
+    if (FLAGS_benchmark_write_rate_limit > 0) {
+      printf(">>>> FLAGS_benchmark_write_rate_limit YCSBA \n");
+      thread->shared->write_rate_limiter.reset(
+          NewGenericRateLimiter(FLAGS_benchmark_write_rate_limit));
+    }
+
+    // the number of iterations is the larger of read_ or write_
+    while (nums > 0) {
+      nums--;
+      DB* db = SelectDB(thread);
+
+      long k;
+      if (FLAGS_YCSB_uniform_distribution) {
+        // Generate number from uniform distribution
+        k = thread->rand.Next() % FLAGS_num;
+      } else {  // default
+        // Generate number from zipf distribution
+        k = nextValue() % FLAGS_num;
+      }
+      GenerateKeyFromInt(k, FLAGS_num, &key);
+
+      int next_op = thread->rand.Next() % 100;
+      if (next_op < 50) {
+        // read
+        Status s = db->Get(options, key, &value);
+        if (!s.ok() && !s.IsNotFound()) {
+          // fprintf(stderr, "k=%d; get error: %s\n", k, s.ToString().c_str());
+          // exit(1);
+          //  we continue after error rather than exiting so that we can
+          //  find more errors if any
+        } else if (!s.IsNotFound()) {
+          found++;
+          thread->stats.FinishedOps(nullptr, db, 1, kRead);
+        }
+        reads_done++;
+
+      } else {
+        // write
+        if (FLAGS_benchmark_write_rate_limit > 0) {
+          thread->shared->write_rate_limiter->Request(
+              value_size_ + key_size_, Env::IO_HIGH, nullptr /* stats */,
+              RateLimiter::OpType::kWrite);
+          thread->stats.ResetLastOpTime();
+        }
+        Status s = db->Put(write_options_, key, gen.Generate(value_size_));
+        if (!s.ok()) {
+          // fprintf(stderr, "put error: %s\n", s.ToString().c_str());
+          // exit(1);
+        } else {
+          writes_done++;
+          thread->stats.FinishedOps(nullptr, db, 1, kWrite);
+        }
+      }
+    }
+    char msg[100];
+    snprintf(msg, sizeof(msg),
+             "( reads:%" PRIu64 " writes:%" PRIu64 " total:%" PRIu64
+             " found:%" PRIu64 " done:%" PRIu64 ")",
+             reads_done, writes_done, readwrites_, found, nums);
+    thread->stats.AddMessage(msg);
+  }
+
+  // Workload B: Read mostly workload
+  // This workload has a 95/5 reads/write mix.
+  // Application example: photo tagging; add a tag is an update,
+  // but most operations are to read tags.
+
+  // Read/update ratio: 95/5
+  // Default data size: 1 KB records
+  // Request distribution: zipfian
+  void YCSBWorkloadB(ThreadState* thread) {
+    ReadOptions options(FLAGS_verify_checksum, true);
+    RandomGenerator gen;
+    init_latestgen(FLAGS_num);
+    init_zipf_generator(0, FLAGS_num, bench_params.zipf_const);
+
+    std::string value;
+    int64_t found = 0;
+
+    int64_t reads_done = 0;
+    int64_t writes_done = 0;
+    int64_t nums = FLAGS_num;
+    Duration duration(FLAGS_duration, 0);
+
+    std::unique_ptr<const char[]> key_guard;
+    Slice key = AllocateKey(&key_guard);
+
+    // the number of iterations is the larger of read_ or write_
+    while (nums > 0) {
+      nums--;
+      DB* db = SelectDB(thread);
+
+      long k;
+      if (FLAGS_YCSB_uniform_distribution) {
+        // Generate number from uniform distribution
+        k = thread->rand.Next() % FLAGS_num;
+      } else {  // default
+        // Generate number from zipf distribution
+        k = nextValue() % FLAGS_num;
+      }
+      GenerateKeyFromInt(k, FLAGS_num, &key);
+
+      int next_op = thread->rand.Next() % 100;
+      if (next_op < 95) {
+        // read
+        Status s = db->Get(options, key, &value);
+        if (!s.ok() && !s.IsNotFound()) {
+          // fprintf(stderr, "get error: %s\n", s.ToString().c_str());
+          //  we continue after error rather than exiting so that we can
+          //  find more errors if any
+        } else if (!s.IsNotFound()) {
+          found++;
+          thread->stats.FinishedOps(nullptr, db, 1, kRead);
+        }
+        reads_done++;
+
+      } else {
+        // write
+        Status s = db->Get(options, key, &value);
+        s = db->Put(write_options_, key, gen.Generate(value_size_));
+        if (!s.ok()) {
+          // fprintf(stderr, "put error: %s\n", s.ToString().c_str());
+          // exit(1);
+        } else {
+          writes_done++;
+          thread->stats.FinishedOps(nullptr, db, 1, kWrite);
+        }
+      }
+    }
+    char msg[100];
+    snprintf(msg, sizeof(msg),
+             "( reads:%" PRIu64 " writes:%" PRIu64 " total:%" PRIu64
+             " found:%" PRIu64 " done:%" PRIu64 ")",
+             reads_done, writes_done, readwrites_, found, nums);
+    thread->stats.AddMessage(msg);
+  }
+
+  // Workload C: Read only
+  // This workload is 100% read. Application example: user profile cache,
+  // where profiles are constructed elsewhere (e.g., Hadoop).
+  // Read/update ratio: 100/0
+  // Default data size: 1 KB records
+  // Request distribution: zipfian
+  void YCSBWorkloadC(ThreadState* thread) {
+    ReadOptions options(FLAGS_verify_checksum, true);
+    RandomGenerator gen;
+    init_latestgen(FLAGS_num);
+    init_zipf_generator(0, FLAGS_num, bench_params.zipf_const);
+
+    std::string value;
+    int64_t found = 0;
+
+    int64_t reads_done = 0;
+    int64_t writes_done = 0;
+    int64_t nums = FLAGS_num;
+    Duration duration(FLAGS_duration, 0);
+
+    std::unique_ptr<const char[]> key_guard;
+    Slice key = AllocateKey(&key_guard);
+
+    // the number of iterations is the larger of read_ or write_
+    while (nums > 0) {
+      nums--;
+      DB* db = SelectDB(thread);
+
+      long k;
+      if (FLAGS_YCSB_uniform_distribution) {
+        // Generate number from uniform distribution
+        k = thread->rand.Next() % FLAGS_num;
+      } else {  // default
+        // Generate number from zipf distribution
+        k = nextValue() % FLAGS_num;
+      }
+      GenerateKeyFromInt(k, FLAGS_num, &key);
+
+      // read
+      Status s = db->Get(options, key, &value);
+      if (!s.ok() && !s.IsNotFound()) {
+        fprintf(stderr, "get error: %s\n", s.ToString().c_str());
+        // we continue after error rather than exiting so that we can
+        // find more errors if any
+      } else if (!s.IsNotFound()) {
+        found++;
+        thread->stats.FinishedOps(nullptr, db, 1, kRead);
+      }
+      reads_done++;
+
+      // std::cout << k << "\n";
+    }
+    char msg[100];
+    snprintf(msg, sizeof(msg),
+             "( reads:%" PRIu64 " writes:%" PRIu64 " total:%" PRIu64
+             " found:%" PRIu64 " done:%" PRIu64 ")",
+             reads_done, writes_done, readwrites_, found, nums);
+    thread->stats.AddMessage(msg);
+  }
+
+  // Workload D: Read latest workload
+  // In this workload, new records are inserted, and the most recently
+  // inserted records are the most popular. Application example:
+  // user status updates; people want to read the latest.
+
+  // Read/update/insert ratio: 95/0/5
+  // Default data size: 1 KB records
+  // Request distribution: latest
+
+  // The insert order for this is hashed, not ordered. The "latest" items may be
+  // scattered around the keyspace if they are keyed by userid.timestamp. A
+  // workload which orders items purely by time, and demands the latest, is very
+  // different than workload here (which we believe is more typical of how
+  // people build systems.)
+  void YCSBWorkloadD(ThreadState* thread) {
+    ReadOptions options(FLAGS_verify_checksum, true);
+    RandomGenerator gen;
+    init_latestgen(FLAGS_num);
+    init_zipf_generator(0, FLAGS_num, bench_params.zipf_const);
+
+    std::string value;
+    int64_t found = 0;
+
+    int64_t reads_done = 0;
+    int64_t writes_done = 0;
+    int64_t nums = FLAGS_num;
+    Duration duration(FLAGS_duration, 0);
+
+    std::unique_ptr<const char[]> key_guard;
+    Slice key = AllocateKey(&key_guard);
+
+    // the number of iterations is the larger of read_ or write_
+    while (!duration.Done(1)) {
+      DB* db = SelectDB(thread);
+
+      long k;
+      if (FLAGS_YCSB_uniform_distribution) {
+        // Generate number from uniform distribution
+        k = thread->rand.Next() % FLAGS_num;
+      } else {  // default
+        // Generate number from latest distribution
+        k = next_value_latestgen() % FLAGS_num;
+      }
+      GenerateKeyFromInt(k, FLAGS_num, &key);
+
+      int next_op = thread->rand.Next() % 100;
+      if (next_op < 95) {
+        // read
+        Status s = db->Get(options, key, &value);
+        if (!s.ok() && !s.IsNotFound()) {
+          // fprintf(stderr, "get error: %s\n", s.ToString().c_str());
+          //  we continue after error rather than exiting so that we can
+          //  find more errors if any
+        } else if (!s.IsNotFound()) {
+          found++;
+          thread->stats.FinishedOps(nullptr, db, 1, kRead);
+        }
+        reads_done++;
+
+      } else {
+        // write
+        Status s = db->Put(write_options_, key, gen.Generate(value_size_));
+        if (!s.ok()) {
+          // fprintf(stderr, "put error: %s\n", s.ToString().c_str());
+          // exit(1);
+        } else {
+          writes_done++;
+          thread->stats.FinishedOps(nullptr, db, 1, kWrite);
+        }
+      }
+    }
+    char msg[100];
+    snprintf(msg, sizeof(msg),
+             "( reads:%" PRIu64 " writes:%" PRIu64 " total:%" PRIu64
+             " found:%" PRIu64 " done:%" PRIu64 ")",
+             reads_done, writes_done, readwrites_, found, nums);
+    thread->stats.AddMessage(msg);
+  }
+
+  // Workload E: Short ranges.
+  // In this workload, short ranges of records are queried,
+  // instead of individual records. Application example:
+  // threaded conversations, where each scan is for the posts
+  // in a given thread (assumed to be clustered by thread id).
+
+  // Scan/insert ratio: 95/5
+  // Default data size: 1 KB records
+  // Request distribution: latest
+  // Scan Length Distribution=uniform
+  // Max scan length = 100
+
+  // The insert order is hashed, not ordered. Although the scans are ordered, it
+  // does not necessarily follow that the data is inserted in order. For
+  // example, posts for thread 342 may not be inserted contiguously, but instead
+  // interspersed with posts from lots of other threads. The way the YCSB client
+  // works is that it will pick a start key, and then request a number of
+  // records; this works fine even for hashed insertion.
+  void YCSBWorkloadE(ThreadState* thread) {
+    ReadOptions options(FLAGS_verify_checksum, true);
+    RandomGenerator gen;
+    init_latestgen(FLAGS_num);
+    init_zipf_generator(0, FLAGS_num, bench_params.zipf_const);
+
+    std::string value;
+    int64_t found = 0;
+
+    int64_t reads_done = 0;
+    int64_t writes_done = 0;
+    int64_t nums = FLAGS_num;
+    Duration duration(FLAGS_duration, 0);
+
+    std::unique_ptr<const char[]> key_guard;
+    Slice key = AllocateKey(&key_guard);
+
+    // the number of iterations is the larger of read_ or write_
+    while (nums > 0) {
+      nums--;
+      DB* db = SelectDB(thread);
+
+      long k;
+      if (FLAGS_YCSB_uniform_distribution) {
+        // Generate number from uniform distribution
+        k = thread->rand.Next() % FLAGS_num;
+      } else {  // default
+        // Generate number from zipf distribution
+        k = nextValue() % FLAGS_num;
+      }
+      GenerateKeyFromInt(k, FLAGS_num, &key);
+
+      int next_op = thread->rand.Next() % 100;
+      if (next_op < 95) {
+        // scan
+
+        // TODO need to draw a random number for the scan length
+        // for now, scan lenght constant
+        //  int scan_length = thread->rand.Next() % 100;
+
+        Iterator* iter = db->NewIterator(options);
+        int64_t i = 0;
+        int64_t bytes = 0;
+        for (iter->Seek(key); i < 100 && iter->Valid(); iter->Next()) {
+          bytes += iter->key().size() + iter->value().size();
+          // thread->stats.FinishedOps(nullptr, db, 1, kRead);
+          ++i;
+        }
+
+        delete iter;
+
+        reads_done++;
+        thread->stats.FinishedOps(nullptr, db, 1, kRead);
+      } else {
+        // write
+        Status s = db->Put(write_options_, key, gen.Generate(value_size_));
+        if (!s.ok()) {
+          // fprintf(stderr, "put error: %s\n", s.ToString().c_str());
+          // exit(1);
+        } else {
+          writes_done++;
+          thread->stats.FinishedOps(nullptr, db, 1, kWrite);
+        }
+      }
+    }
+    char msg[100];
+    snprintf(msg, sizeof(msg),
+             "( reads:%" PRIu64 " writes:%" PRIu64 " total:%" PRIu64
+             " found:%" PRIu64 " done:%" PRIu64 ")",
+             reads_done, writes_done, readwrites_, found, nums);
+    thread->stats.AddMessage(msg);
+  }
+
+  // Workload F: Read-modify-write workload
+  // In this workload, the client will read a record,
+  // modify it, and write back the changes. Application
+  // example: user database, where user records are read
+  // and modified by the user or to record user activity.
+
+  // Read/read-modify-write ratio: 50/50
+  // Default data size: 1 KB records
+  // Request distribution: zipfian
+
+  void YCSBWorkloadF(ThreadState* thread) {
+    ReadOptions options(FLAGS_verify_checksum, true);
+    RandomGenerator gen;
+    init_latestgen(FLAGS_num);
+    init_zipf_generator(0, FLAGS_num, bench_params.zipf_const);
+
+    std::string value;
+    int64_t found = 0;
+
+    int64_t reads_done = 0;
+    int64_t writes_done = 0;
+    int64_t nums = FLAGS_num;
+    Duration duration(FLAGS_duration, 0);
+
+    std::unique_ptr<const char[]> key_guard;
+    Slice key = AllocateKey(&key_guard);
+
+    // the number of iterations is the larger of read_ or write_
+    while (nums > 0) {
+      nums--;
+      DB* db = SelectDB(thread);
+
+      long k;
+      if (FLAGS_YCSB_uniform_distribution) {
+        // Generate number from uniform distribution
+        k = thread->rand.Next() % FLAGS_num;
+      } else {  // default
+        // Generate number from zipf distribution
+        k = nextValue() % FLAGS_num;
+      }
+      GenerateKeyFromInt(k, FLAGS_num, &key);
+
+      int next_op = thread->rand.Next() % 100;
+      if (next_op < 50) {
+        // read
+        Status s = db->Get(options, key, &value);
+        if (!s.ok() && !s.IsNotFound()) {
+          // fprintf(stderr, "get error: %s\n", s.ToString().c_str());
+          //  we continue after error rather than exiting so that we can
+          //  find more errors if any
+        } else if (!s.IsNotFound()) {
+          found++;
+          thread->stats.FinishedOps(nullptr, db, 1, kRead);
+        }
+        reads_done++;
+
+      } else {
+        // read-modify-write.
+        Status s = db->Get(options, key, &value);
+        s = db->Put(write_options_, key, gen.Generate(value_size_));
+        if (!s.ok()) {
+          // fprintf(stderr, "put error: %s\n", s.ToString().c_str());
+          // exit(1);
+        } else {
+          writes_done++;
+          thread->stats.FinishedOps(nullptr, db, 1, kWrite);
+        }
+      }
+    }
+    char msg[100];
+    snprintf(msg, sizeof(msg),
+             "( reads:%" PRIu64 " writes:%" PRIu64 " total:%" PRIu64
+             " found:%" PRIu64 " done:%" PRIu64 ")",
+             reads_done, writes_done, readwrites_, found, nums);
+    thread->stats.AddMessage(msg);
+  }
+
+  void YCSBWorkloadW(ThreadState* thread) {
+    ReadOptions options(FLAGS_verify_checksum, true);
+    RandomGenerator gen;
+    init_zipf_generator(0, FLAGS_key_range, bench_params.zipf_const);
+
+    std::string value;
+    int64_t writes_done = 0;
+    int64_t nums = FLAGS_num;
+    Duration duration(FLAGS_duration, 0);
+
+    std::unique_ptr<const char[]> key_guard;
+    Slice key = AllocateKey(&key_guard);
+
+    if (FLAGS_benchmark_write_rate_limit > 0) {
+      printf(">>>> FLAGS_benchmark_write_rate_limit YCSBA \n");
+      thread->shared->write_rate_limiter.reset(
+          NewGenericRateLimiter(FLAGS_benchmark_write_rate_limit));
+    }
+
+    // 전체 작업은 쓰기 작업만 수행
+    while (nums > 0) {
+      nums--;
+      DB* db = SelectDB(thread);
+
+      long k;
+      if (FLAGS_YCSB_uniform_distribution) {
+        // 균등 분포에서 번호 생성
+        k = thread->rand.Next() % FLAGS_num;
+      } else {
+        // zipf 분포에서 번호 생성
+        k = nextValue() % FLAGS_key_range;
+      }
+      GenerateKeyFromInt(k, FLAGS_key_range, &key);
+
+      // 쓰기 작업 수행
+      if (FLAGS_benchmark_write_rate_limit > 0) {
+        thread->shared->write_rate_limiter->Request(
+            value_size_ + key_size_, Env::IO_HIGH, nullptr /* stats */,
+            RateLimiter::OpType::kWrite);
+        thread->stats.ResetLastOpTime();
+      }
+      Status s = db->Put(write_options_, key, gen.Generate(value_size_));
+      if (!s.ok()) {
+        // fprintf(stderr, "put error: %s\n", s.ToString().c_str());
+        // exit(1);
+      } else {
+        writes_done++;
+        thread->stats.FinishedOps(nullptr, db, 1, kWrite);
+      }
+    }
+    char msg[100];
+    snprintf(msg, sizeof(msg), "( writes:%" PRIu64 " total:%" PRIu64 ")",
+             writes_done, readwrites_);
+    thread->stats.AddMessage(msg);
+  }
+
+  void FillStep(ThreadState* thread) {  // performs rand->zipf d8, d9, 1, 1.1
+    // ReadOptions options(FLAGS_verify_checksum, true);
+    // RandomGenerator gen;
+    // init_zipf_generator(0, FLAGS_num, bench_params.zipf_const);
+    //
+    // std::string value;
+    // int64_t writes_done = 0;
+    // int64_t nums = FLAGS_num;
+    // Duration duration(FLAGS_duration, 0);
+    //
+    // std::unique_ptr<const char[]> key_guard;
+    // Slice key = AllocateKey(&key_guard);
+    //
+    // if (FLAGS_benchmark_write_rate_limit > 0) {
+    //   printf(">>>> FLAGS_benchmark_write_rate_limit YCSBA \n");
+    //   thread->shared->write_rate_limiter.reset(
+    //       NewGenericRateLimiter(FLAGS_benchmark_write_rate_limit));
+    // }
+
+    // do random write
+    FLAGS_num = 10000000;
+    char msg[100];
+    int64_t now;
+    Env::Default()->GetCurrentTime(&now);
+    snprintf(msg, sizeof(msg), "(%ld) Workload random started\n", now);
+    thread->stats.AddMessage(msg);
+    DoWrite(thread, RANDOM);
+    thread->stats.AddMessage("rand ended");
+
+    FLAGS_num = 10000000;
+    bench_params.zipf_const = 0.8;
+    Env::Default()->GetCurrentTime(&now);
+    snprintf(msg, sizeof(msg), "(%ld) Workload zip 0.8 started\n", now);
+    thread->stats.AddMessage(msg);
+    YCSBWorkloadW(thread);
+
+    FLAGS_num = 10000000;
+    bench_params.zipf_const = 0.9;
+    Env::Default()->GetCurrentTime(&now);
+    snprintf(msg, sizeof(msg), "(%ld) Workload zip 0.9 started\n", now);
+    thread->stats.AddMessage(msg);
+    YCSBWorkloadW(thread);
+
+    FLAGS_num = 10000000;
+    bench_params.zipf_const = 0.99;
+    Env::Default()->GetCurrentTime(&now);
+    snprintf(msg, sizeof(msg), "(%ld) Workload zip 1 started\n", now);
+    thread->stats.AddMessage(msg);
+    YCSBWorkloadW(thread);
+
+    FLAGS_num = 10000000;
+    bench_params.zipf_const = 1.1;
+    Env::Default()->GetCurrentTime(&now);
+    snprintf(msg, sizeof(msg), "(%ld) Workload zip 1.1 started\n", now);
+    thread->stats.AddMessage(msg);
+    YCSBWorkloadW(thread);
+  }
+
+  // Lee: tt replay func
+  void TwitterTrace(ThreadState* thread) {
+    // Single-DB assumption for simplicity.
+    if (db_.db == nullptr) {
+      fprintf(stderr, "twittertrace: only single-DB mode is supported.\n");
+      ErrorExit();
+    }
+
+    DB* db = db_.db;
+
+    if (FLAGS_twitter_trace_file.empty()) {
+      fprintf(stderr,
+              "twittertrace: --twitter_trace_file must be specified.\n");
+      ErrorExit();
+    }
+
+    std::ifstream in(FLAGS_twitter_trace_file);
+    if (!in) {
+      fprintf(stderr, "twittertrace: failed to open trace file '%s'\n",
+              FLAGS_twitter_trace_file.c_str());
+      ErrorExit();
+    }
+
+    // Approximate file size for progress reporting (may be 0 if unknown).
+    uint64_t file_size = 0;
+    Status fs_s = FLAGS_env->GetFileSize(FLAGS_twitter_trace_file, &file_size);
+    if (!fs_s.ok()) {
+      file_size = 0;
+    }
+
+    // Approximate text-bytes limit per chunk.
+    const uint64_t chunk_limit = (FLAGS_twitter_chunk_bytes == 0)
+                                     ? std::numeric_limits<uint64_t>::max()
+                                     : FLAGS_twitter_chunk_bytes;
+
+    uint64_t total_lines = 0;
+    uint64_t total_gets = 0;
+    uint64_t total_puts = 0;
+    uint64_t total_found = 0;
+    uint64_t total_bytes = 0;       // bytes transferred via DB operations
+    uint64_t total_text_bytes = 0;  // NEW: raw text bytes read from trace
+
+    ReadOptions read_opts = read_options_;
+    WriteOptions write_opts = write_options_;
+
+    std::string line;
+    std::string value_buf;  // reused dummy value buffer
+
+    uint64_t chunk_index = 0;
+
+    while (true) {
+      // One chunk: load lines until chunk_limit is reached (in text bytes)
+      std::vector<TwitterTraceRecord> records;
+      records.reserve(1024);
+
+      uint64_t text_bytes_in_chunk = 0;
+
+      while (text_bytes_in_chunk < chunk_limit && std::getline(in, line)) {
+        text_bytes_in_chunk +=
+            static_cast<uint64_t>(line.size()) + 1;  // +1 for '\n'
+
+        TwitterTraceRecord rec;
+        if (!ParseTwitterTraceLine(line, &rec)) {
+          continue;  // skip malformed lines
+        }
+        records.emplace_back(std::move(rec));
+      }
+
+      if (records.empty()) {
+        // No more data to process (EOF or only malformed lines remain)
+        break;
+      }
+
+      chunk_index++;
+      total_text_bytes += text_bytes_in_chunk;
+
+      // Optional: progress just after loading the chunk
+      if (file_size > 0) {
+        double pct = 100.0 * static_cast<long double>(total_text_bytes) /
+                     static_cast<long double>(file_size);
+        fprintf(stdout,
+                "twittertrace: loaded chunk %" PRIu64
+                " (%.3f GiB text, %.2f%% of file)\n",
+                chunk_index,
+                static_cast<double>(text_bytes_in_chunk) /
+                    (1024.0 * 1024.0 * 1024.0),
+                pct);
+      } else {
+        fprintf(
+            stdout,
+            "twittertrace: loaded chunk %" PRIu64
+            " (%.3f GiB text, cumulative %.3f GiB)\n",
+            chunk_index,
+            static_cast<double>(text_bytes_in_chunk) /
+                (1024.0 * 1024.0 * 1024.0),
+            static_cast<double>(total_text_bytes) / (1024.0 * 1024.0 * 1024.0));
+      }
+      fflush(stdout);
+
+      // Replay this chunk into RocksDB
+      uint64_t chunk_lines = 0;
+      uint64_t chunk_gets = 0;
+      uint64_t chunk_puts = 0;
+      uint64_t chunk_found = 0;
+      uint64_t chunk_bytes = 0;
+
+      for (const auto& rec : records) {
+        Status s;
+        Slice key(rec.key);
+
+        if (rec.op == "get" || rec.op == "gets") {
+          chunk_gets++;
+          std::string val;
+          s = db->Get(read_opts, key, &val);
+          if (s.ok()) {
+            chunk_found++;
+            chunk_bytes += key.size() + val.size();
+          } else if (!s.IsNotFound()) {
+            fprintf(stderr, "twittertrace: Get error: %s\n",
+                    s.ToString().c_str());
+            ErrorExit();
+          }
+          thread->stats.FinishedOps(&db_, db, 1, kRead);
+
+        } else if (rec.op == "set" || rec.op == "add" || rec.op == "replace" ||
+                   rec.op == "append" || rec.op == "prepend") {
+          chunk_puts++;
+
+          // Generate dummy value of requested size.
+          if (value_buf.size() < rec.value_size) {
+            value_buf.assign(rec.value_size, 'x');
+          }
+          Slice val(value_buf.data(), rec.value_size);
+
+          s = db->Put(write_opts, key, val);
+          if (!s.ok()) {
+            fprintf(stderr, "twittertrace: Put error: %s\n",
+                    s.ToString().c_str());
+            ErrorExit();
+          }
+          chunk_bytes += key.size() + rec.value_size;
+          thread->stats.FinishedOps(&db_, db, 1, kWrite);
+
+        } else {
+          // Ignore other ops: delete, incr, decr, cas, etc.
+          continue;
+        }
+
+        chunk_lines++;
+      }
+
+      // Accumulate per-chunk statistics into totals
+      total_lines += chunk_lines;
+      total_gets += chunk_gets;
+      total_puts += chunk_puts;
+      total_found += chunk_found;
+      total_bytes += chunk_bytes;
+
+      // Progress after replaying the chunk
+      fprintf(stdout,
+              "twittertrace: replayed chunk %" PRIu64 " (lines:%" PRIu64
+              ", gets:%" PRIu64 ", puts:%" PRIu64 ")\n",
+              chunk_index, chunk_lines, chunk_gets, chunk_puts);
+      fflush(stdout);
+
+      // If EOF reached, stop; otherwise, next iteration will load another chunk
+      if (!in.good() && in.eof()) {
+        break;
+      }
+    }
+
+    // Final statistics
+    thread->stats.AddBytes(total_bytes);
+
+    char msg[256];
+    snprintf(msg, sizeof(msg),
+             "(twittertrace total_lines:%" PRIu64 " gets:%" PRIu64
+             " (found:%" PRIu64 ") puts:%" PRIu64 ")",
+             total_lines, total_gets, total_found, total_puts);
+    thread->stats.AddMessage(msg);
+  }
+
+  void OneKeyWrite(ThreadState* thread) {
+    ReadOptions options(FLAGS_verify_checksum, true);
+    RandomGenerator gen;
+
+    std::string value;
+    int64_t writes_done = 0;
+    int64_t nums = FLAGS_num;
+    Duration duration(FLAGS_duration, 0);
+
+    std::unique_ptr<const char[]> key_guard;
+    Slice key = AllocateKey(&key_guard);
+
+    if (FLAGS_benchmark_write_rate_limit > 0) {
+      printf(">>>> FLAGS_benchmark_write_rate_limit YCSBA \n");
+      thread->shared->write_rate_limiter.reset(
+          NewGenericRateLimiter(FLAGS_benchmark_write_rate_limit));
+    }
+
+    // 전체 작업은 쓰기 작업만 수행
+    while (nums > 0) {
+      nums--;
+      DB* db = SelectDB(thread);
+
+      long k = 1;  // LYM: use only one key
+      GenerateKeyFromInt(k, FLAGS_num, &key);
+
+      // 쓰기 작업 수행
+      if (FLAGS_benchmark_write_rate_limit > 0) {
+        thread->shared->write_rate_limiter->Request(
+            value_size_ + key_size_, Env::IO_HIGH, nullptr /* stats */,
+            RateLimiter::OpType::kWrite);
+        thread->stats.ResetLastOpTime();
+      }
+      Status s = db->Put(write_options_, key, gen.Generate(value_size_));
+      if (!s.ok()) {
+        // fprintf(stderr, "put error: %s\n", s.ToString().c_str());
+        // exit(1);
+      } else {
+        writes_done++;
+        thread->stats.FinishedOps(nullptr, db, 1, kWrite);
+      }
+    }
+    char msg[100];
+    snprintf(msg, sizeof(msg), "( writes:%" PRIu64 " total:%" PRIu64 ")",
+             writes_done, readwrites_);
+    thread->stats.AddMessage(msg);
+  }
+
+  void LatestGenerator(__attribute__((unused)) ThreadState* thread) {
+    printf("Latest Generator distribution test\n");
+    // Need a zipf generator
+    init_zipf_generator(0, 50, bench_params.zipf_const);
+    init_latestgen(50);
+
+    for (int i = 0; i < 100; i++) {
+      printf("%ld\n", next_value_latestgen());
+    }
+  }
+
+  void Zipf(__attribute__((unused)) ThreadState* thread) {
+    printf("ZIPF distribution test\n");
+    init_zipf_generator(0, 1000, bench_params.zipf_const);
+    long vect[1000];
+    for (int i = 0; i < 1000; i++) {
+      vect[i] = 0;
+    }
+    for (int i = 0; i <= 10000; i++) {
+      vect[nextValue()] += 1;
+    }
+    for (int i = 0; i < 1000; i++) {
+      printf("%ld\n", vect[i]);
+    }
+  }
 
   void SeekRandom(ThreadState* thread) {
     int64_t read = 0;
@@ -7286,13 +7920,6 @@ class Benchmark {
 
     Duration duration(FLAGS_duration, reads_);
     char value_buffer[256];
-    std::unique_ptr<ManagedSnapshot> snapshot = nullptr;
-    if (FLAGS_explicit_snapshot) {
-      snapshot = std::make_unique<ManagedSnapshot>(db_.db);
-      options.snapshot = snapshot->snapshot();
-    } else {
-      options.snapshot = nullptr;
-    }
     while (!duration.Done(1)) {
       int64_t seek_pos = thread->rand.Next() % FLAGS_num;
       GenerateKeyFromIntForSeek(static_cast<uint64_t>(seek_pos), FLAGS_num,
@@ -7431,7 +8058,7 @@ class Benchmark {
       thread->stats.FinishedOps(nullptr, db, entries_per_batch_, kDelete);
       if (!s.ok()) {
         fprintf(stderr, "del error: %s\n", s.ToString().c_str());
-        db_bench_exit(1);
+        exit(1);
       }
       i += entries_per_batch_;
     }
@@ -7547,7 +8174,7 @@ class Benchmark {
 
       if (!s.ok()) {
         fprintf(stderr, "put or merge error: %s\n", s.ToString().c_str());
-        db_bench_exit(1);
+        exit(1);
       }
       bytes += key.size() + val.size() + user_timestamp_size_;
       thread->stats.FinishedOps(&db_, db_.db, 1, kWrite);
@@ -7574,7 +8201,7 @@ class Benchmark {
                                &expanded_keys[offset]);
             if (!db->Delete(write_options_, expanded_keys[offset]).ok()) {
               fprintf(stderr, "delete error: %s\n", s.ToString().c_str());
-              db_bench_exit(1);
+              exit(1);
             }
           }
         } else {
@@ -7585,7 +8212,7 @@ class Benchmark {
                                begin_key, end_key)
                    .ok()) {
             fprintf(stderr, "deleterange error: %s\n", s.ToString().c_str());
-            db_bench_exit(1);
+            exit(1);
           }
         }
         thread->stats.FinishedOps(&db_, db_.db, 1, kWrite);
@@ -7621,13 +8248,6 @@ class Benchmark {
       ts_guard.reset(new char[user_timestamp_size_]);
       ts = mock_app_clock_->GetTimestampForRead(thread->rand, ts_guard.get());
       read_options.timestamp = &ts;
-    }
-    std::unique_ptr<ManagedSnapshot> snapshot = nullptr;
-    if (FLAGS_explicit_snapshot) {
-      snapshot = std::make_unique<ManagedSnapshot>(db_.db);
-      read_options.snapshot = snapshot->snapshot();
-    } else {
-      read_options.snapshot = nullptr;
     }
     Iterator* iter = db_.db->NewIterator(read_options);
 
@@ -7819,7 +8439,7 @@ class Benchmark {
         Status s = PutMany(db, write_options_, key, gen.Generate());
         if (!s.ok()) {
           fprintf(stderr, "putmany error: %s\n", s.ToString().c_str());
-          db_bench_exit(1);
+          exit(1);
         }
         put_weight--;
         puts_done++;
@@ -7828,7 +8448,7 @@ class Benchmark {
         Status s = DeleteMany(db, write_options_, key);
         if (!s.ok()) {
           fprintf(stderr, "deletemany error: %s\n", s.ToString().c_str());
-          db_bench_exit(1);
+          exit(1);
         }
         delete_weight--;
         deletes_done++;
@@ -7972,7 +8592,7 @@ class Benchmark {
       }
       if (!s.ok()) {
         fprintf(stderr, "put error: %s\n", s.ToString().c_str());
-        db_bench_exit(1);
+        exit(1);
       }
       bytes += key.size() + val.size() + user_timestamp_size_;
       thread->stats.FinishedOps(nullptr, db, 1, kUpdate);
@@ -8019,7 +8639,7 @@ class Benchmark {
       } else if (!status.IsNotFound()) {
         fprintf(stderr, "Get returned an error: %s\n",
                 status.ToString().c_str());
-        db_bench_exit(1);
+        exit(1);
       }
 
       Slice value =
@@ -8157,7 +8777,7 @@ class Benchmark {
 
       if (!s.ok()) {
         fprintf(stderr, "merge error: %s\n", s.ToString().c_str());
-        db_bench_exit(1);
+        exit(1);
       }
       bytes += key.size() + val.size();
       thread->stats.FinishedOps(nullptr, db_with_cfh->db, 1, kMerge);
@@ -8199,7 +8819,7 @@ class Benchmark {
         Status s = db->Merge(write_options_, key, gen.Generate());
         if (!s.ok()) {
           fprintf(stderr, "merge error: %s\n", s.ToString().c_str());
-          db_bench_exit(1);
+          exit(1);
         }
         num_merges++;
         thread->stats.FinishedOps(nullptr, db, 1, kMerge);
@@ -8243,13 +8863,6 @@ class Benchmark {
       ts_guard.reset(new char[user_timestamp_size_]);
       ts = mock_app_clock_->GetTimestampForRead(thread->rand, ts_guard.get());
       read_opts.timestamp = &ts;
-    }
-    std::unique_ptr<ManagedSnapshot> snapshot = nullptr;
-    if (FLAGS_explicit_snapshot) {
-      snapshot = std::make_unique<ManagedSnapshot>(db);
-      read_opts.snapshot = snapshot->snapshot();
-    } else {
-      read_opts.snapshot = nullptr;
     }
     std::unique_ptr<Iterator> iter(db->NewIterator(read_opts));
 
@@ -8391,7 +9004,7 @@ class Benchmark {
     Status s = db->VerifyChecksum(ro);
     if (!s.ok()) {
       fprintf(stderr, "VerifyChecksum() failed: %s\n", s.ToString().c_str());
-      db_bench_exit(1);
+      exit(1);
     }
   }
 
@@ -8408,7 +9021,7 @@ class Benchmark {
     if (!s.ok()) {
       fprintf(stderr, "VerifyFileChecksums() failed: %s\n",
               s.ToString().c_str());
-      db_bench_exit(1);
+      exit(1);
     }
   }
 
@@ -8532,7 +9145,7 @@ class Benchmark {
       }
       if (!s.ok()) {
         fprintf(stderr, "Operation failed: %s\n", s.ToString().c_str());
-        db_bench_exit(1);
+        exit(1);
       }
     }
 
@@ -8570,7 +9183,7 @@ class Benchmark {
 
       if (!s.ok()) {
         fprintf(stderr, "Operation failed: %s\n", s.ToString().c_str());
-        db_bench_exit(1);
+        exit(1);
       }
 
       thread->stats.FinishedOps(nullptr, db, 1, kOthers);
@@ -8877,7 +9490,7 @@ class Benchmark {
 
       if (!s.ok()) {
         fprintf(stderr, "Flush failed: %s\n", s.ToString().c_str());
-        db_bench_exit(1);
+        exit(1);
       }
     } else {
       for (const auto& db_with_cfh : multi_dbs_) {
@@ -8891,7 +9504,7 @@ class Benchmark {
 
         if (!s.ok()) {
           fprintf(stderr, "Flush failed: %s\n", s.ToString().c_str());
-          db_bench_exit(1);
+          exit(1);
         }
       }
     }
@@ -9007,7 +9620,7 @@ class Benchmark {
           "Encountered an error creating a TraceReader from the trace file. "
           "Error: %s\n",
           s.ToString().c_str());
-      db_bench_exit(1);
+      exit(1);
     }
     std::unique_ptr<Replayer> replayer;
     s = db_with_cfh->db->NewDefaultReplayer(db_with_cfh->cfh,
@@ -9017,7 +9630,7 @@ class Benchmark {
               "Encountered an error creating a default Replayer. "
               "Error: %s\n",
               s.ToString().c_str());
-      db_bench_exit(1);
+      exit(1);
     }
     s = replayer->Prepare();
     if (!s.ok()) {
@@ -9079,11 +9692,10 @@ class Benchmark {
   }
 };
 
-int db_bench_tool(int argc, char** argv, ToolHooks& hooks) {
+int db_bench_tool(int argc, char** argv) {
   ROCKSDB_NAMESPACE::port::InstallStackTraceHandler();
   ConfigOptions config_options;
   static bool initialized = false;
-  hooks_ = &hooks;
   if (!initialized) {
     SetUsageMessage(std::string("\nUSAGE:\n") + std::string(argv[0]) +
                     " [OPTIONS]...");
@@ -9091,12 +9703,13 @@ int db_bench_tool(int argc, char** argv, ToolHooks& hooks) {
     initialized = true;
   }
   ParseCommandLineFlags(&argc, &argv, true);
+  bench_params.zipf_const = FLAGS_zipf_const;
   FLAGS_compaction_style_e =
       (ROCKSDB_NAMESPACE::CompactionStyle)FLAGS_compaction_style;
   if (FLAGS_statistics && !FLAGS_statistics_string.empty()) {
     fprintf(stderr,
             "Cannot provide both --statistics and --statistics_string.\n");
-    db_bench_exit(1);
+    exit(1);
   }
   if (!FLAGS_statistics_string.empty()) {
     Status s = Statistics::CreateFromString(config_options,
@@ -9105,7 +9718,7 @@ int db_bench_tool(int argc, char** argv, ToolHooks& hooks) {
       fprintf(stderr,
               "No Statistics registered matching string: %s status=%s\n",
               FLAGS_statistics_string.c_str(), s.ToString().c_str());
-      db_bench_exit(1);
+      exit(1);
     }
   }
   if (FLAGS_statistics) {
@@ -9144,7 +9757,7 @@ int db_bench_tool(int argc, char** argv, ToolHooks& hooks) {
   int env_opts = !FLAGS_env_uri.empty() + !FLAGS_fs_uri.empty();
   if (env_opts > 1) {
     fprintf(stderr, "Error: --env_uri and --fs_uri are mutually exclusive\n");
-    db_bench_exit(1);
+    exit(1);
   }
 
   if (env_opts == 1) {
@@ -9152,7 +9765,7 @@ int db_bench_tool(int argc, char** argv, ToolHooks& hooks) {
                                   &FLAGS_env, &env_guard);
     if (!s.ok()) {
       fprintf(stderr, "Failed creating env: %s\n", s.ToString().c_str());
-      db_bench_exit(1);
+      exit(1);
     }
   } else if (FLAGS_simulate_hdd || FLAGS_simulate_hybrid_fs_file != "") {
     //**TODO: Make the simulate fs something that can be loaded
@@ -9173,7 +9786,7 @@ int db_bench_tool(int argc, char** argv, ToolHooks& hooks) {
     std::string build_info;
     std::cout << GetRocksBuildInfoAsString(build_info, true) << std::endl;
     // Similar to --version, nothing else will be done when this flag is set
-    db_bench_exit(0);
+    exit(0);
   }
 
   if (!FLAGS_seed) {
@@ -9189,7 +9802,7 @@ int db_bench_tool(int argc, char** argv, ToolHooks& hooks) {
     fprintf(stderr,
             "`-use_existing_db` must be true for `-use_existing_keys` to be "
             "settable\n");
-    db_bench_exit(1);
+    exit(1);
   }
 
   FLAGS_value_size_distribution_type_e =
@@ -9228,11 +9841,14 @@ int db_bench_tool(int argc, char** argv, ToolHooks& hooks) {
 
   if (FLAGS_seek_missing_prefix && FLAGS_prefix_size <= 8) {
     fprintf(stderr, "prefix_size > 8 required by --seek_missing_prefix\n");
-    db_bench_exit(1);
+    exit(1);
   }
 
+  init_zipf_generator(0, FLAGS_num, bench_params.zipf_const);
+  init_latestgen(FLAGS_num);
+
   ROCKSDB_NAMESPACE::Benchmark benchmark;
-  benchmark.Run(hooks);
+  benchmark.Run();
 
   if (FLAGS_print_malloc_stats) {
     std::string stats_string;

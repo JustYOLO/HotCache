@@ -14,7 +14,6 @@
 #include "db_stress_tool/db_stress_common.h"
 #include "db_stress_tool/db_stress_shared_state.h"
 #include "rocksdb/experimental.h"
-#include "utilities/fault_injection_fs.h"
 
 namespace ROCKSDB_NAMESPACE {
 class SystemClock;
@@ -26,13 +25,6 @@ using experimental::SstQueryFilterConfigsManager;
 
 class StressTest {
  public:
-  static bool IsErrorInjectedAndRetryable(const Status& error_s) {
-    assert(!error_s.ok());
-    return error_s.getState() &&
-           FaultInjectionTestFS::IsInjectedError(error_s) &&
-           !status_to_io_status(Status(error_s)).GetDataLoss();
-  }
-
   StressTest();
 
   virtual ~StressTest() {}
@@ -61,7 +53,6 @@ class StressTest {
     Status s = db_->EnableAutoCompaction(column_families_);
     return s;
   }
-  Options GetOptions(int cf_id);
   void CleanUp();
 
  protected:
@@ -283,10 +274,6 @@ class StressTest {
     return Status::NotSupported();
   }
 
-  Status TestMultiScan(ThreadState* thread, const ReadOptions& read_opts,
-                       const std::vector<int>& rand_column_families,
-                       const std::vector<int64_t>& rand_keys);
-
   // Enum used by VerifyIterator() to identify the mode to validate.
   enum LastIterateOp {
     kLastOpSeek,
@@ -358,6 +345,13 @@ class StressTest {
     return Status::NotSupported("TestCustomOperations() must be overridden");
   }
 
+  bool IsErrorInjectedAndRetryable(const Status& error_s) const {
+    assert(!error_s.ok());
+    return error_s.getState() &&
+           FaultInjectionTestFS::IsInjectedError(error_s) &&
+           !status_to_io_status(Status(error_s)).GetDataLoss();
+  }
+
   void ProcessStatus(SharedState* shared, std::string msg, const Status& s,
                      bool ignore_injected_error = true) const;
 
@@ -397,8 +391,6 @@ class StressTest {
                                           std::string& ts_str, Slice& ts_slice,
                                           ReadOptions& read_opts);
 
-  void CleanUpColumnFamilies();
-
   std::shared_ptr<Cache> cache_;
   std::shared_ptr<Cache> compressed_cache_;
   std::shared_ptr<const FilterPolicy> filter_policy_;
@@ -420,8 +412,9 @@ class StressTest {
   std::atomic<bool> db_preload_finished_;
   std::shared_ptr<SstQueryFilterConfigsManager::Factory> sqfc_factory_;
 
-  DB* secondary_db_;
-  std::vector<ColumnFamilyHandle*> secondary_cfhs_;
+  // Fields used for continuous verification from another thread
+  DB* cmp_db_;
+  std::vector<ColumnFamilyHandle*> cmp_cfhs_;
   bool is_db_stopped_;
 };
 

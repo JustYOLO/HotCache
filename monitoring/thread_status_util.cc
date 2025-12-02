@@ -11,7 +11,7 @@
 
 namespace ROCKSDB_NAMESPACE {
 
-#ifndef NROCKSDB_THREAD_STATUS
+#ifdef ROCKSDB_USING_THREAD_STATUS
 thread_local ThreadStatusUpdater*
     ThreadStatusUtil::thread_updater_local_cache_ = nullptr;
 thread_local bool ThreadStatusUtil::thread_updater_initialized_ = false;
@@ -171,10 +171,9 @@ AutoThreadOperationStageUpdater::~AutoThreadOperationStageUpdater() {
 ThreadStatusUpdater* ThreadStatusUtil::thread_updater_local_cache_ = nullptr;
 bool ThreadStatusUtil::thread_updater_initialized_ = false;
 
-void ThreadStatusUtil::RegisterThread(
-    const Env* /*env*/, ThreadStatus::ThreadType /*thread_type*/) {}
-
-void ThreadStatusUtil::UnregisterThread() {}
+bool ThreadStatusUtil::MaybeInitThreadLocalUpdater(const Env* /*env*/) {
+  return false;
+}
 
 void ThreadStatusUtil::SetEnableTracking(bool /*enable_tracking*/) {}
 
@@ -205,15 +204,11 @@ void ThreadStatusUtil::EraseDatabaseInfo(const DB* /*db*/) {}
 
 void ThreadStatusUtil::ResetThreadStatus() {}
 
-bool ThreadStatusUtil::MaybeInitThreadLocalUpdater(const Env* /*env*/) {
-  return false;
-}
-
 AutoThreadOperationStageUpdater::AutoThreadOperationStageUpdater(
     ThreadStatus::OperationStage /*stage*/) {}
 
 AutoThreadOperationStageUpdater::~AutoThreadOperationStageUpdater() {}
 
-#endif  // !NROCKSDB_THREAD_STATUS
+#endif  // ROCKSDB_USING_THREAD_STATUS
 
 }  // namespace ROCKSDB_NAMESPACE

@@ -132,7 +132,6 @@ TEST_F(HashTableTest, TestErase) {
 }
 
 TEST_F(EvictableHashTableTest, TestEvict) {
-#ifndef __clang_analyzer__
   const uint64_t max_keys = 1024 * 1024;
 
   // insert
@@ -149,7 +148,6 @@ TEST_F(EvictableHashTableTest, TestEvict) {
     assert(val->val_ == std::string(1000, val->key_ % 255));
     delete val;
   }
-#endif  // __clang_analyzer__
 }
 
 }  // namespace ROCKSDB_NAMESPACE

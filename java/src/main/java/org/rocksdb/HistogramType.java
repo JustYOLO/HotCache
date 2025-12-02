@@ -210,9 +210,7 @@ public enum HistogramType {
    */
   TABLE_OPEN_PREFETCH_TAIL_READ_BYTES((byte) 0x3D),
 
-  COMPACTION_PREFETCH_BYTES((byte) 0x3F),
-
-  // 0x3E is reserved for backwards compatibility on current minor version.
+  // 0x3E for backwards compatibility on current minor version.
   HISTOGRAM_ENUM_MAX((byte) 0x3E);
 
   private final byte value;

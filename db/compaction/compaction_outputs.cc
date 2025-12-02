@@ -54,9 +54,7 @@ Status CompactionOutputs::Finish(
   }
   current_output().finished = true;
   stats_.bytes_written += current_bytes;
-  stats_.bytes_written_pre_comp += builder_->PreCompressionSize();
-  stats_.num_output_files = static_cast<int>(outputs_.size());
-  worker_cpu_micros_ += builder_->GetWorkerCPUMicros();
+  stats_.num_output_files = outputs_.size();
 
   return s;
 }
@@ -278,11 +276,7 @@ bool CompactionOutputs::ShouldStopBefore(const CompactionIterator& c_iter) {
   }
 
   // reach the max file size
-  uint64_t estimated_file_size = current_output_file_size_;
-  if (compaction_->mutable_cf_options().target_file_size_is_upper_bound) {
-    estimated_file_size += builder_->EstimatedTailSize();
-  }
-  if (estimated_file_size >= compaction_->max_output_file_size()) {
+  if (current_output_file_size_ >= compaction_->max_output_file_size()) {
     return true;
   }
 
@@ -326,7 +320,7 @@ bool CompactionOutputs::ShouldStopBefore(const CompactionIterator& c_iter) {
     // More details, check PR #1963
     const size_t num_skippable_boundaries_crossed =
         being_grandparent_gap_ ? 2 : 3;
-    if (compaction_->immutable_options().compaction_style ==
+    if (compaction_->immutable_options()->compaction_style ==
             kCompactionStyleLevel &&
         num_grandparent_boundaries_crossed >=
             num_skippable_boundaries_crossed &&
@@ -347,7 +341,7 @@ bool CompactionOutputs::ShouldStopBefore(const CompactionIterator& c_iter) {
     // target file size. The test shows it can generate larger files than a
     // static threshold like 75% and has a similar write amplification
     // improvement.
-    if (compaction_->immutable_options().compaction_style ==
+    if (compaction_->immutable_options()->compaction_style ==
             kCompactionStyleLevel &&
         current_output_file_size_ >=
             ((compaction_->target_output_file_size() + 99) / 100) *
@@ -363,8 +357,7 @@ bool CompactionOutputs::ShouldStopBefore(const CompactionIterator& c_iter) {
 Status CompactionOutputs::AddToOutput(
     const CompactionIterator& c_iter,
     const CompactionFileOpenFunc& open_file_func,
-    const CompactionFileCloseFunc& close_file_func,
-    const ParsedInternalKey& prev_table_last_internal_key) {
+    const CompactionFileCloseFunc& close_file_func) {
   Status s;
   bool is_range_del = c_iter.IsDeleteRangeSentinelKey();
   if (is_range_del && compaction_->bottommost_level()) {
@@ -375,8 +368,7 @@ Status CompactionOutputs::AddToOutput(
   }
   const Slice& key = c_iter.key();
   if (ShouldStopBefore(c_iter) && HasBuilder()) {
-    s = close_file_func(c_iter.InputStatus(), prev_table_last_internal_key, key,
-                        &c_iter, *this);
+    s = close_file_func(*this, c_iter.InputStatus(), key);
     if (!s.ok()) {
       return s;
     }
@@ -467,7 +459,6 @@ Status CompactionOutputs::AddRangeDels(
     const Slice* comp_start_user_key, const Slice* comp_end_user_key,
     CompactionIterationStats& range_del_out_stats, bool bottommost_level,
     const InternalKeyComparator& icmp, SequenceNumber earliest_snapshot,
-    std::pair<SequenceNumber, SequenceNumber> keep_seqno_range,
     const Slice& next_table_min_key, const std::string& full_history_ts_low) {
   // The following example does not happen since
   // CompactionOutput::ShouldStopBefore() always return false for the first
@@ -596,12 +587,6 @@ Status CompactionOutputs::AddRangeDels(
   for (it->SeekToFirst(); it->Valid(); it->Next()) {
     auto tombstone = it->Tombstone();
     auto kv = tombstone.Serialize();
-    // Filter out by seqno for per-key placement
-    if (tombstone.seq_ < keep_seqno_range.first ||
-        tombstone.seq_ >= keep_seqno_range.second) {
-      continue;
-    }
-
     InternalKey tombstone_end = tombstone.SerializeEndKey();
     // TODO: the underlying iterator should support clamping the bounds.
     // tombstone_end.Encode is of form user_key@kMaxSeqno
@@ -760,10 +745,11 @@ Status CompactionOutputs::AddRangeDels(
 }
 
 void CompactionOutputs::FillFilesToCutForTtl() {
-  if (compaction_->immutable_options().compaction_style !=
+  if (compaction_->immutable_options()->compaction_style !=
           kCompactionStyleLevel ||
-      compaction_->immutable_options().compaction_pri != kMinOverlappingRatio ||
-      compaction_->mutable_cf_options().ttl == 0 ||
+      compaction_->immutable_options()->compaction_pri !=
+          kMinOverlappingRatio ||
+      compaction_->mutable_cf_options()->ttl == 0 ||
       compaction_->num_input_levels() < 2 || compaction_->bottommost_level()) {
     return;
   }
@@ -771,19 +757,20 @@ void CompactionOutputs::FillFilesToCutForTtl() {
   // We define new file with the oldest ancestor time to be younger than 1/4
   // TTL, and an old one to be older than 1/2 TTL time.
   int64_t temp_current_time;
-  auto get_time_status = compaction_->immutable_options().clock->GetCurrentTime(
-      &temp_current_time);
+  auto get_time_status =
+      compaction_->immutable_options()->clock->GetCurrentTime(
+          &temp_current_time);
   if (!get_time_status.ok()) {
     return;
   }
 
   auto current_time = static_cast<uint64_t>(temp_current_time);
-  if (current_time < compaction_->mutable_cf_options().ttl) {
+  if (current_time < compaction_->mutable_cf_options()->ttl) {
     return;
   }
 
   uint64_t old_age_thres =
-      current_time - compaction_->mutable_cf_options().ttl / 2;
+      current_time - compaction_->mutable_cf_options()->ttl / 2;
   const std::vector<FileMetaData*>& olevel =
       *(compaction_->inputs(compaction_->num_input_levels() - 1));
   for (FileMetaData* file : olevel) {
@@ -793,15 +780,15 @@ void CompactionOutputs::FillFilesToCutForTtl() {
     // of small files.
     if (oldest_ancester_time < old_age_thres &&
         file->fd.GetFileSize() >
-            compaction_->mutable_cf_options().target_file_size_base / 2) {
+            compaction_->mutable_cf_options()->target_file_size_base / 2) {
       files_to_cut_for_ttl_.push_back(file);
     }
   }
 }
 
 CompactionOutputs::CompactionOutputs(const Compaction* compaction,
-                                     const bool is_proximal_level)
-    : compaction_(compaction), is_proximal_level_(is_proximal_level) {
+                                     const bool is_penultimate_level)
+    : compaction_(compaction), is_penultimate_level_(is_penultimate_level) {
   partitioner_ = compaction->output_level() == 0
                      ? nullptr
                      : compaction->CreateSstPartitioner();

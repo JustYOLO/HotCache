@@ -248,7 +248,7 @@ Status CompactedDBImpl::Init(const Options& options) {
 }
 
 Status CompactedDBImpl::Open(const Options& options, const std::string& dbname,
-                             std::unique_ptr<DB>* dbptr) {
+                             DB** dbptr) {
   *dbptr = nullptr;
 
   if (options.max_open_files != -1) {
@@ -267,7 +267,7 @@ Status CompactedDBImpl::Open(const Options& options, const std::string& dbname,
     ROCKS_LOG_INFO(db->immutable_db_options_.info_log,
                    "Opened the db as fully compacted mode");
     LogFlush(db->immutable_db_options_.info_log);
-    *dbptr = std::move(db);
+    *dbptr = db.release();
   }
   return s;
 }

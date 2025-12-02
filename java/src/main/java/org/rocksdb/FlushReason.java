@@ -17,10 +17,7 @@ public enum FlushReason {
   DELETE_FILES((byte) 0x08),
   AUTO_COMPACTION((byte) 0x09),
   MANUAL_FLUSH((byte) 0x0a),
-  ERROR_RECOVERY((byte) 0x0b),
-  ERROR_RECOVERY_RETRY_FLUSH((byte) 0x0c),
-  WAL_FULL((byte) 0x0d),
-  CATCH_UP_AFTER_ERROR_RECOVERY((byte) 0x0e);
+  ERROR_RECOVERY((byte) 0xb);
 
   private final byte value;
 

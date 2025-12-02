@@ -11,8 +11,7 @@ namespace ROCKSDB_NAMESPACE {
 class CompactOnDeletionCollector : public TablePropertiesCollector {
  public:
   CompactOnDeletionCollector(size_t sliding_window_size,
-                             size_t deletion_trigger, double deletion_ratio,
-                             uint64_t min_file_size);
+                             size_t deletion_trigger, double deletion_raatio);
 
   // AddUserKey() will be called when a new key/value pair is inserted into the
   // table.
@@ -37,7 +36,7 @@ class CompactOnDeletionCollector : public TablePropertiesCollector {
   // The name of the properties collector can be used for debugging purpose.
   const char* Name() const override { return "CompactOnDeletionCollector"; }
 
-  // Return whether the output file should be further compacted
+  // EXPERIMENTAL Return whether the output file should be further compacted
   bool NeedCompact() const override { return need_compaction_; }
 
   static const int kNumBuckets = 128;
@@ -49,21 +48,18 @@ class CompactOnDeletionCollector : public TablePropertiesCollector {
   // "bucket_size_" keys.
   size_t num_deletions_in_buckets_[kNumBuckets];
   // the number of keys in a bucket
-  const size_t bucket_size_;
+  size_t bucket_size_;
 
   size_t current_bucket_;
   size_t num_keys_in_current_bucket_;
   size_t num_deletions_in_observation_window_;
-  const size_t deletion_trigger_;
+  size_t deletion_trigger_;
   const double deletion_ratio_;
+  const bool deletion_ratio_enabled_;
   size_t total_entries_ = 0;
   size_t deletion_entries_ = 0;
-  const size_t min_file_size_;
-  size_t cur_file_size_;
-  size_t max_deletion_in_window_;
-  const bool deletion_ratio_enabled_;
   // true if the current SST file needs to be compacted.
   bool need_compaction_;
-  bool finished_ = false;
+  bool finished_;
 };
 }  // namespace ROCKSDB_NAMESPACE

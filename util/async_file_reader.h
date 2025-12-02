@@ -36,10 +36,9 @@ class AsyncFileReader {
                                             const IOOptions& opts,
                                             FSReadRequest* read_reqs,
                                             size_t num_reqs,
-                                            AlignedBuf* aligned_buf,
-                                            IODebugContext* dbg) noexcept {
-    return ReadOperation<ReadAwaiter>{*this,    file,        opts, read_reqs,
-                                      num_reqs, aligned_buf, dbg};
+                                            AlignedBuf* aligned_buf) noexcept {
+    return ReadOperation<ReadAwaiter>{*this,     file,     opts,
+                                      read_reqs, num_reqs, aligned_buf};
   }
 
  private:
@@ -50,14 +49,12 @@ class AsyncFileReader {
    public:
     explicit ReadAwaiter(AsyncFileReader& reader, RandomAccessFileReader* file,
                          const IOOptions& opts, FSReadRequest* read_reqs,
-                         size_t num_reqs, AlignedBuf* /*aligned_buf*/,
-                         IODebugContext* dbg) noexcept
+                         size_t num_reqs, AlignedBuf* /*aligned_buf*/) noexcept
         : reader_(reader),
           file_(file),
           opts_(opts),
           read_reqs_(read_reqs),
           num_reqs_(num_reqs),
-          dbg_(dbg),
           next_(nullptr) {}
 
     bool await_ready() noexcept { return false; }
@@ -85,7 +82,6 @@ class AsyncFileReader {
     const IOOptions& opts_;
     FSReadRequest* read_reqs_;
     size_t num_reqs_;
-    IODebugContext* dbg_;
     autovector<void*, 32> io_handle_;
     autovector<IOHandleDeleter, 32> del_fn_;
     folly::coro::impl::coroutine_handle<> awaiting_coro_;
@@ -105,20 +101,18 @@ class AsyncFileReader {
     explicit ReadOperation(AsyncFileReader& reader,
                            RandomAccessFileReader* file, const IOOptions& opts,
                            FSReadRequest* read_reqs, size_t num_reqs,
-                           AlignedBuf* aligned_buf,
-                           IODebugContext* dbg) noexcept
+                           AlignedBuf* aligned_buf) noexcept
         : reader_(reader),
           file_(file),
           opts_(opts),
           read_reqs_(read_reqs),
           num_reqs_(num_reqs),
-          aligned_buf_(aligned_buf),
-          dbg_(dbg) {}
+          aligned_buf_(aligned_buf) {}
 
     auto viaIfAsync(folly::Executor::KeepAlive<> executor) const {
       return folly::coro::co_viaIfAsync(
-          std::move(executor), Awaiter{reader_, file_, opts_, read_reqs_,
-                                       num_reqs_, aligned_buf_, dbg_});
+          std::move(executor),
+          Awaiter{reader_, file_, opts_, read_reqs_, num_reqs_, aligned_buf_});
     }
 
    private:
@@ -128,7 +122,6 @@ class AsyncFileReader {
     FSReadRequest* read_reqs_;
     size_t num_reqs_;
     AlignedBuf* aligned_buf_;
-    IODebugContext* dbg_;
   };
 
   // This function does the actual work when this awaitable starts execution

@@ -46,8 +46,7 @@ class BlockBuilder {
   // AddWithLastKey() in contexts where previous added key is already known
   // and delta encoding might be used.
   void Add(const Slice& key, const Slice& value,
-           const Slice* const delta_value = nullptr,
-           bool skip_delta_encoding = false);
+           const Slice* const delta_value = nullptr);
 
   // A faster version of Add() if the previous key is already known for all
   // Add()s.
@@ -60,8 +59,7 @@ class BlockBuilder {
   // DO NOT mix with Add() between Resets.
   void AddWithLastKey(const Slice& key, const Slice& value,
                       const Slice& last_key,
-                      const Slice* const delta_value = nullptr,
-                      bool skip_delta_encoding = false);
+                      const Slice* const delta_value = nullptr);
 
   // Finish building the block and return a slice that refers to the
   // block contents.  The returned slice will remain valid for the
@@ -82,13 +80,11 @@ class BlockBuilder {
   // Return true iff no entries have been added since the last Reset()
   bool empty() const { return buffer_.empty(); }
 
-  std::string& MutableBuffer() { return buffer_; }
-
  private:
   inline void AddWithLastKeyImpl(const Slice& key, const Slice& value,
                                  const Slice& last_key,
                                  const Slice* const delta_value,
-                                 bool skip_delta_encoding, size_t buffer_size);
+                                 size_t buffer_size);
 
   inline const Slice MaybeStripTimestampFromKey(std::string* key_buf,
                                                 const Slice& key);

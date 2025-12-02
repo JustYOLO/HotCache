@@ -38,7 +38,6 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-#include <functional>
 #include <memory>
 #include <stdexcept>
 #include <unordered_set>
@@ -163,12 +162,6 @@ class MemTableRep {
     return true;
   }
 
-  // Only used after concurrent memtable inserts.
-  // This function will be called by each writer after all writes are done
-  // through InsertConcurrently().
-  // This is used by VectorRep to do batched writes for concurrent inserts.
-  virtual void BatchPostProcess() {}
-
   // Returns true iff an entry that compares equal to key is in the collection.
   virtual bool Contains(const char* key) const = 0;
 
@@ -202,12 +195,11 @@ class MemTableRep {
                    bool (*callback_func)(void* arg, const char* entry));
 
   // Same as Get() but performs data integrity validation.
-  virtual Status GetAndValidate(
-      const LookupKey& /* k */, void* /* callback_args */,
-      bool (* /* callback_func */)(void* arg, const char* entry),
-      bool /* allow_data_in_error */, bool /* detect_key_out_of_order */,
-      const std::function<Status(const char*, bool)>&
-      /* key_validation_callback */) {
+  virtual Status GetAndValidate(const LookupKey& /* k */,
+                                void* /* callback_args */,
+                                bool (* /* callback_func */)(void* arg,
+                                                             const char* entry),
+                                bool /*allow_data_in_error*/) {
     return Status::NotSupported("GetAndValidate() not implemented.");
   }
 
@@ -278,11 +270,9 @@ class MemTableRep {
     // Seek and perform integrity validations on the skip list.
     // Iterator becomes invalid and Corruption is returned if a
     // corruption is found.
-    virtual Status SeekAndValidate(
-        const Slice& /* internal_key */, const char* /* memtable_key */,
-        bool /* allow_data_in_errors */, bool /* detect_key_out_of_order */,
-        const std::function<Status(const char*, bool)>&
-        /* key_validation_callback */) {
+    virtual Status SeekAndValidate(const Slice& /* internal_key */,
+                                   const char* /* memtable_key */,
+                                   bool /* allow_data_in_errors */) {
       return Status::NotSupported("SeekAndValidate() not implemented.");
     }
 
@@ -407,11 +397,6 @@ class SkipListFactory : public MemTableRepFactory {
 // the vector is sorted. This is useful for workloads where iteration is very
 // rare and writes are generally not issued after reads begin.
 //
-// Concurrent inserts are supported by buffering writes in thread-local vectors
-// for each write batch. To optimize performance for concurrent inserts, it is
-// recommended to perform batched writes, and enable unordered_write (refer to
-// the option comment for its impact on read consistency).
-//
 // Parameters:
 //   count: Passed to the constructor of the underlying std::vector of each
 //     VectorRep. On initialization, the underlying array will be at least count
@@ -433,8 +418,6 @@ class VectorRepFactory : public MemTableRepFactory {
   MemTableRep* CreateMemTableRep(const MemTableRep::KeyComparator&, Allocator*,
                                  const SliceTransform*,
                                  Logger* logger) override;
-
-  bool IsInsertConcurrentlySupported() const override { return true; }
 };
 
 // This class contains a fixed array of buckets, each

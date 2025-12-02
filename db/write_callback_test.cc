@@ -191,7 +191,7 @@ TEST_P(WriteCallbackPTest, WriteWithCallbackTest) {
     }
 
     ReadOptions read_options;
-    std::unique_ptr<DB> db;
+    DB* db;
     DBImpl* db_impl;
 
     ASSERT_OK(DestroyDB(dbname, options));
@@ -208,7 +208,7 @@ TEST_P(WriteCallbackPTest, WriteWithCallbackTest) {
     assert(handles.size() == 1);
     delete handles[0];
 
-    db_impl = dynamic_cast<DBImpl*>(db.get());
+    db_impl = dynamic_cast<DBImpl*>(db);
     ASSERT_TRUE(db_impl);
 
     // Writers that have called JoinBatchGroup.
@@ -402,7 +402,7 @@ TEST_P(WriteCallbackPTest, WriteWithCallbackTest) {
 
     ASSERT_EQ(seq.load(), db_impl->TEST_GetLastVisibleSequence());
 
-    db.reset();
+    delete db;
     ASSERT_OK(DestroyDB(dbname, options));
   }
 }

@@ -10,7 +10,7 @@
 #if defined(__linux__)
 #include <asm/hwcap.h>
 #endif
-#if defined(ROCKSDB_AUXV_GETAUXVAL_PRESENT)
+#ifdef ROCKSDB_AUXV_GETAUXVAL_PRESENT
 #include <sys/auxv.h>
 #endif
 #ifndef HWCAP_CRC32

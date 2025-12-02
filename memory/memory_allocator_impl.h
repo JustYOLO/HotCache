@@ -12,8 +12,8 @@
 
 namespace ROCKSDB_NAMESPACE {
 
-struct CacheAllocationDeleter {
-  CacheAllocationDeleter(MemoryAllocator* a = nullptr) : allocator(a) {}
+struct CustomDeleter {
+  CustomDeleter(MemoryAllocator* a = nullptr) : allocator(a) {}
 
   void operator()(char* ptr) const {
     if (allocator) {
@@ -26,12 +26,12 @@ struct CacheAllocationDeleter {
   MemoryAllocator* allocator;
 };
 
-using CacheAllocationPtr = std::unique_ptr<char[], CacheAllocationDeleter>;
+using CacheAllocationPtr = std::unique_ptr<char[], CustomDeleter>;
 
 inline CacheAllocationPtr AllocateBlock(size_t size,
                                         MemoryAllocator* allocator) {
   if (allocator) {
-    auto block = static_cast<char*>(allocator->Allocate(size));
+    auto block = reinterpret_cast<char*>(allocator->Allocate(size));
     return CacheAllocationPtr(block, allocator);
   }
   return CacheAllocationPtr(new char[size]);

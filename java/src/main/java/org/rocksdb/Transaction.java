@@ -203,7 +203,7 @@ public class Transaction extends RocksObject {
    * Status::Busy() may be returned if the transaction could not guarantee
    * that there are no write conflicts. Status::TryAgain() may be returned
    * if the memtable history size is not large enough
-   *  (See max_write_buffer_size_to_maintain).
+   *  (See max_write_buffer_number_to_maintain).
    * <p>
    * If this transaction was created by a {@link TransactionDB},
    * Status::Expired() may be returned if this transaction has lived for
@@ -662,46 +662,6 @@ public class Transaction extends RocksObject {
   }
 
   /**
-   * This function is similar to
-   * {@link RocksDB#multiGetAsList} except it will
-   * also read pending changes in this transaction.
-   * Currently, this function will return Status::MergeInProgress if the most
-   * recent write to the queried key in this batch is a Merge.
-   * <p>
-   * If {@link ReadOptions#snapshot()} is not set, the current version of the
-   * key will be read. Calling {@link #setSnapshot()} does not affect the
-   * version of the data returned.
-   * <p>
-   * Note that setting {@link ReadOptions#setSnapshot(Snapshot)} will affect
-   * what is read from the DB but will NOT change which keys are read from this
-   * transaction (the keys in this transaction do not yet belong to any snapshot
-   * and will be fetched regardless).
-   * <p>
-   * This method uses the optimized path with support for batched reads.
-   *
-   * @param readOptions Read options.=
-   *     {@link org.rocksdb.ColumnFamilyHandle} instances.
-   * @param columnFamilyHandle {@link org.rocksdb.ColumnFamilyHandle}
-   *     instance
-   * @param keys of keys for which values need to be retrieved.
-   *
-   * @return Array of values, one for each key
-   *
-   * @throws RocksDBException thrown if error happens in underlying
-   *    native library.
-   */
-  public List<byte[]> multiGetAsList(final ReadOptions readOptions,
-      final ColumnFamilyHandle columnFamilyHandle, final List<byte[]> keys)
-      throws RocksDBException {
-    if (keys.isEmpty()) {
-      return new ArrayList<>(0);
-    }
-    final byte[][] keysArray = keys.toArray(new byte[keys.size()][]);
-    return Arrays.asList(multiGet(
-        nativeHandle_, readOptions.nativeHandle_, columnFamilyHandle.nativeHandle_, keysArray));
-  }
-
-  /**
    * Read this key and ensure that this transaction will only
    * be able to be committed if this key is not written outside this
    * transaction after it has first been read (or after the snapshot if a
@@ -729,7 +689,8 @@ public class Transaction extends RocksObject {
    *     {@link Status.Code#Busy} if there is a write conflict,
    *     {@link Status.Code#TimedOut} if a lock could not be acquired,
    *     {@link Status.Code#TryAgain} if the memtable history size is not large
-   *         enough.
+   *         enough. See
+   *         {@link ColumnFamilyOptions#maxWriteBufferNumberToMaintain()}
    *     {@link Status.Code#MergeInProgress} if merge operations cannot be
    *     resolved.
    *
@@ -809,7 +770,8 @@ public class Transaction extends RocksObject {
    *     {@link Status.Code#Busy} if there is a write conflict,
    *     {@link Status.Code#TimedOut} if a lock could not be acquired,
    *     {@link Status.Code#TryAgain} if the memtable history size is not large
-   *         enough.
+   *         enough. See
+   *         {@link ColumnFamilyOptions#maxWriteBufferNumberToMaintain()}
    *     {@link Status.Code#MergeInProgress} if merge operations cannot be
    *     resolved.
    *
@@ -859,7 +821,8 @@ public class Transaction extends RocksObject {
    *     {@link Status.Code#Busy} if there is a write conflict,
    *     {@link Status.Code#TimedOut} if a lock could not be acquired,
    *     {@link Status.Code#TryAgain} if the memtable history size is not large
-   *         enough.
+   *         enough. See
+   *         {@link ColumnFamilyOptions#maxWriteBufferNumberToMaintain()}
    *     {@link Status.Code#MergeInProgress} if merge operations cannot be
    *     resolved.
    *
@@ -917,7 +880,8 @@ public class Transaction extends RocksObject {
    *     {@link Status.Code#Busy} if there is a write conflict,
    *     {@link Status.Code#TimedOut} if a lock could not be acquired,
    *     {@link Status.Code#TryAgain} if the memtable history size is not large
-   *         enough.
+   *         enough. See
+   *         {@link ColumnFamilyOptions#maxWriteBufferNumberToMaintain()}
    *     {@link Status.Code#MergeInProgress} if merge operations cannot be
    *     resolved.
    *
@@ -969,7 +933,8 @@ public class Transaction extends RocksObject {
    *     {@link Status.Code#Busy} if there is a write conflict,
    *     {@link Status.Code#TimedOut} if a lock could not be acquired,
    *     {@link Status.Code#TryAgain} if the memtable history size is not large
-   *         enough.
+   *         enough. See
+   *         {@link ColumnFamilyOptions#maxWriteBufferNumberToMaintain()}
    *     {@link Status.Code#MergeInProgress} if merge operations cannot be
    *     resolved.
    *
@@ -1023,7 +988,8 @@ public class Transaction extends RocksObject {
    *     {@link Status.Code#Busy} if there is a write conflict,
    *     {@link Status.Code#TimedOut} if a lock could not be acquired,
    *     {@link Status.Code#TryAgain} if the memtable history size is not large
-   *         enough.
+   *         enough. See
+   *         {@link ColumnFamilyOptions#maxWriteBufferNumberToMaintain()}
    *     {@link Status.Code#MergeInProgress} if merge operations cannot be
    *     resolved.
    *
@@ -1084,7 +1050,8 @@ public class Transaction extends RocksObject {
    *     {@link Status.Code#Busy} if there is a write conflict,
    *     {@link Status.Code#TimedOut} if a lock could not be acquired,
    *     {@link Status.Code#TryAgain} if the memtable history size is not large
-   *         enough.
+   *         enough. See
+   *         {@link ColumnFamilyOptions#maxWriteBufferNumberToMaintain()}
    *     {@link Status.Code#MergeInProgress} if merge operations cannot be
    *     resolved.
    *
@@ -1139,7 +1106,8 @@ public class Transaction extends RocksObject {
    *     {@link Status.Code#Busy} if there is a write conflict,
    *     {@link Status.Code#TimedOut} if a lock could not be acquired,
    *     {@link Status.Code#TryAgain} if the memtable history size is not large
-   *         enough.
+   *         enough. See
+   *         {@link ColumnFamilyOptions#maxWriteBufferNumberToMaintain()}
    *     {@link Status.Code#MergeInProgress} if merge operations cannot be
    *     resolved.
    *
@@ -1425,7 +1393,8 @@ public class Transaction extends RocksObject {
    *     {@link Status.Code#Busy} if there is a write conflict,
    *     {@link Status.Code#TimedOut} if a lock could not be acquired,
    *     {@link Status.Code#TryAgain} if the memtable history size is not large
-   *         enough.
+   *         enough. See
+   *         {@link ColumnFamilyOptions#maxWriteBufferNumberToMaintain()}
    *
    * @param columnFamilyHandle The column family to put the key/value into
    * @param key the specified key to be inserted.
@@ -1461,7 +1430,8 @@ public class Transaction extends RocksObject {
    *     {@link Status.Code#Busy} if there is a write conflict,
    *     {@link Status.Code#TimedOut} if a lock could not be acquired,
    *     {@link Status.Code#TryAgain} if the memtable history size is not large
-   *         enough.
+   *         enough. See
+   *         {@link ColumnFamilyOptions#maxWriteBufferNumberToMaintain()}
    *
    * @param columnFamilyHandle The column family to put the key/value into
    * @param key the specified key to be inserted.
@@ -1490,7 +1460,8 @@ public class Transaction extends RocksObject {
    *    {@link Status.Code#Busy} if there is a write conflict,
    *    {@link Status.Code#TimedOut} if a lock could not be acquired,
    *    {@link Status.Code#TryAgain} if the memtable history size is not large
-   *       enough.
+   *       enough. See
+   *       {@link ColumnFamilyOptions#maxWriteBufferNumberToMaintain()}
    *
    * @param key the specified key to be inserted.
    * @param value the value associated with the specified key.
@@ -1565,7 +1536,8 @@ public class Transaction extends RocksObject {
    *    {@link Status.Code#Busy} if there is a write conflict,
    *    {@link Status.Code#TimedOut} if a lock could not be acquired,
    *    {@link Status.Code#TryAgain} if the memtable history size is not large
-   *       enough.
+   *       enough. See
+   *       {@link ColumnFamilyOptions#maxWriteBufferNumberToMaintain()}
    *
    * @param key the specified key to be inserted.
    * @param value the value associated with the specified key.
@@ -1603,7 +1575,8 @@ public class Transaction extends RocksObject {
    *    {@link Status.Code#Busy} if there is a write conflict,
    *    {@link Status.Code#TimedOut} if a lock could not be acquired,
    *    {@link Status.Code#TryAgain} if the memtable history size is not large
-   *       enough.
+   *       enough. See
+   *       {@link ColumnFamilyOptions#maxWriteBufferNumberToMaintain()}
    *
    * @param columnFamilyHandle The column family to put the key/value into
    * @param key the specified key to be inserted.
@@ -1672,7 +1645,8 @@ public class Transaction extends RocksObject {
    *    {@link Status.Code#Busy} if there is a write conflict,
    *    {@link Status.Code#TimedOut} if a lock could not be acquired,
    *    {@link Status.Code#TryAgain} if the memtable history size is not large
-   *       enough.
+   *       enough. See
+   *       {@link ColumnFamilyOptions#maxWriteBufferNumberToMaintain()}
    *
    * @param columnFamilyHandle The column family to merge the key/value into
    * @param key the specified key to be merged.
@@ -1709,7 +1683,8 @@ public class Transaction extends RocksObject {
    *    {@link Status.Code#Busy} if there is a write conflict,
    *    {@link Status.Code#TimedOut} if a lock could not be acquired,
    *    {@link Status.Code#TryAgain} if the memtable history size is not large
-   *       enough.
+   *       enough. See
+   *       {@link ColumnFamilyOptions#maxWriteBufferNumberToMaintain()}
    *
    * @param columnFamilyHandle The column family to merge the key/value into
    * @param key the specified key to be merged.
@@ -1738,7 +1713,8 @@ public class Transaction extends RocksObject {
    *    {@link Status.Code#Busy} if there is a write conflict,
    *    {@link Status.Code#TimedOut} if a lock could not be acquired,
    *    {@link Status.Code#TryAgain} if the memtable history size is not large
-   *       enough.
+   *       enough. See
+   *       {@link ColumnFamilyOptions#maxWriteBufferNumberToMaintain()}
    *
    * @param key the specified key to be merged.
    * @param value the value associated with the specified key.
@@ -1765,7 +1741,8 @@ public class Transaction extends RocksObject {
    *    {@link Status.Code#Busy} if there is a write conflict,
    *    {@link Status.Code#TimedOut} if a lock could not be acquired,
    *    {@link Status.Code#TryAgain} if the memtable history size is not large
-   *       enough.
+   *       enough. See
+   *       {@link ColumnFamilyOptions#maxWriteBufferNumberToMaintain()}
    *
    * @param key the specified key to be merged.
    * @param value the value associated with the specified key.
@@ -1801,7 +1778,8 @@ public class Transaction extends RocksObject {
    *    {@link Status.Code#Busy} if there is a write conflict,
    *    {@link Status.Code#TimedOut} if a lock could not be acquired,
    *    {@link Status.Code#TryAgain} if the memtable history size is not large
-   *       enough.
+   *       enough. See
+   *       {@link ColumnFamilyOptions#maxWriteBufferNumberToMaintain()}
    *
    * @param columnFamilyHandle in which to apply the merge
    * @param key the specified key to be merged.
@@ -1843,7 +1821,8 @@ public class Transaction extends RocksObject {
    *    {@link Status.Code#Busy} if there is a write conflict,
    *    {@link Status.Code#TimedOut} if a lock could not be acquired,
    *    {@link Status.Code#TryAgain} if the memtable history size is not large
-   *       enough.
+   *       enough. See
+   *       {@link ColumnFamilyOptions#maxWriteBufferNumberToMaintain()}
    *
    * @param columnFamilyHandle in which to apply the merge
    * @param key the specified key to be merged.
@@ -1870,7 +1849,8 @@ public class Transaction extends RocksObject {
    *    {@link Status.Code#Busy} if there is a write conflict,
    *    {@link Status.Code#TimedOut} if a lock could not be acquired,
    *    {@link Status.Code#TryAgain} if the memtable history size is not large
-   *       enough.
+   *       enough. See
+   *       {@link ColumnFamilyOptions#maxWriteBufferNumberToMaintain()}
    *
    * @param columnFamilyHandle The column family to delete the key/value from
    * @param key the specified key to be deleted.
@@ -1905,7 +1885,8 @@ public class Transaction extends RocksObject {
    *    {@link Status.Code#Busy} if there is a write conflict,
    *    {@link Status.Code#TimedOut} if a lock could not be acquired,
    *    {@link Status.Code#TryAgain} if the memtable history size is not large
-   *       enough.
+   *       enough. See
+   *       {@link ColumnFamilyOptions#maxWriteBufferNumberToMaintain()}
    *
    * @param columnFamilyHandle The column family to delete the key/value from
    * @param key the specified key to be deleted.
@@ -1933,7 +1914,8 @@ public class Transaction extends RocksObject {
    *    {@link Status.Code#Busy} if there is a write conflict,
    *    {@link Status.Code#TimedOut} if a lock could not be acquired,
    *    {@link Status.Code#TryAgain} if the memtable history size is not large
-   *       enough.
+   *       enough. See
+   *       {@link ColumnFamilyOptions#maxWriteBufferNumberToMaintain()}
    *
    * @param key the specified key to be deleted.
    *
@@ -2019,7 +2001,8 @@ public class Transaction extends RocksObject {
    *    {@link Status.Code#Busy} if there is a write conflict,
    *    {@link Status.Code#TimedOut} if a lock could not be acquired,
    *    {@link Status.Code#TryAgain} if the memtable history size is not large
-   *       enough.
+   *       enough. See
+   *       {@link ColumnFamilyOptions#maxWriteBufferNumberToMaintain()}
    *
    * @param columnFamilyHandle The column family to delete the key/value from
    * @param key the specified key to be deleted.
@@ -2055,7 +2038,8 @@ public class Transaction extends RocksObject {
    *    {@link Status.Code#Busy} if there is a write conflict,
    *    {@link Status.Code#TimedOut} if a lock could not be acquired,
    *    {@link Status.Code#TryAgain} if the memtable history size is not large
-   *       enough.
+   *       enough. See
+   *       {@link ColumnFamilyOptions#maxWriteBufferNumberToMaintain()}
    *
    * @param columnFamilyHandle The column family to delete the key/value from
    * @param key the specified key to be deleted.
@@ -2084,7 +2068,8 @@ public class Transaction extends RocksObject {
    *    {@link Status.Code#Busy} if there is a write conflict,
    *    {@link Status.Code#TimedOut} if a lock could not be acquired,
    *    {@link Status.Code#TryAgain} if the memtable history size is not large
-   *       enough.
+   *       enough. See
+   *       {@link ColumnFamilyOptions#maxWriteBufferNumberToMaintain()}
    *
    * @param key the specified key to be deleted.
    *
@@ -2917,8 +2902,6 @@ public class Transaction extends RocksObject {
       final byte[][] keys, final long[] columnFamilyHandles) throws RocksDBException;
   private static native byte[][] multiGet(
       final long handle, final long readOptionsHandle, final byte[][] keys) throws RocksDBException;
-  private static native byte[][] multiGet(final long nativeHandle, final long readOptionsHandle,
-      final long cfHandle, final byte[][] keys) throws RocksDBException;
   private static native byte[] getForUpdate(final long handle, final long readOptionsHandle,
       final byte[] key, final int keyOffset, final int keyLength, final long columnFamilyHandle,
       final boolean exclusive, final boolean doValidate) throws RocksDBException;

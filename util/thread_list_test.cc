@@ -10,7 +10,7 @@
 #include "rocksdb/db.h"
 #include "test_util/testharness.h"
 
-#ifndef NROCKSDB_THREAD_STATUS
+#ifdef ROCKSDB_USING_THREAD_STATUS
 
 namespace ROCKSDB_NAMESPACE {
 
@@ -359,4 +359,4 @@ int main(int argc, char** argv) {
   return 0;
 }
 
-#endif  // !NROCKSDB_THREAD_STATUS
+#endif  // ROCKSDB_USING_THREAD_STATUS

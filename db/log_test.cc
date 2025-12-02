@@ -129,8 +129,7 @@ class LogTest
     std::string message_;
 
     ReportCollector() : dropped_bytes_(0) {}
-    void Corruption(size_t bytes, const Status& status,
-                    uint64_t /*log_number*/ = kMaxSequenceNumber) override {
+    void Corruption(size_t bytes, const Status& status) override {
       dropped_bytes_ += bytes;
       message_.append(status.ToString());
     }
@@ -466,7 +465,7 @@ TEST_P(LogTest, TruncatedTrailingRecordIsNotIgnored) {
   Write("foo");
   ShrinkSize(4);  // Drop all payload as well as a header byte
   ASSERT_EQ("EOF", Read(WALRecoveryMode::kAbsoluteConsistency));
-  // Truncated last record is not ignored, treated as an error
+  // Truncated last record is ignored, not treated as an error
   ASSERT_GT(DroppedBytes(), 0U);
   ASSERT_EQ("OK", MatchError("Corruption: truncated header"));
 }
@@ -826,8 +825,7 @@ class RetriableLogTest : public ::testing::TestWithParam<int> {
     std::string message_;
 
     ReportCollector() : dropped_bytes_(0) {}
-    void Corruption(size_t bytes, const Status& status,
-                    uint64_t /*log_number*/ = kMaxSequenceNumber) override {
+    void Corruption(size_t bytes, const Status& status) override {
       dropped_bytes_ += bytes;
       message_.append(status.ToString());
     }

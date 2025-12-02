@@ -17,10 +17,9 @@ class DBEncryptionTest : public DBTestBase {
  public:
   DBEncryptionTest()
       : DBTestBase("db_encryption_test", /*env_do_fsync=*/true) {}
-  Env* GetNonEncryptedEnv() {
+  Env* GetTargetEnv() {
     if (encrypted_env_ != nullptr) {
-      return (static_cast_with_check<CompositeEnvWrapper>(encrypted_env_))
-          ->env_target();
+      return (static_cast<EnvWrapper*>(encrypted_env_))->target();
     } else {
       return env_;
     }
@@ -39,7 +38,7 @@ TEST_F(DBEncryptionTest, CheckEncrypted) {
   auto status = env_->GetChildren(dbname_, &fileNames);
   ASSERT_OK(status);
 
-  Env* target = GetNonEncryptedEnv();
+  Env* target = GetTargetEnv();
   int hits = 0;
   for (auto it = fileNames.begin(); it != fileNames.end(); ++it) {
     if (*it == "LOCK") {
@@ -90,7 +89,7 @@ TEST_F(DBEncryptionTest, CheckEncrypted) {
 }
 
 TEST_F(DBEncryptionTest, ReadEmptyFile) {
-  auto defaultEnv = GetNonEncryptedEnv();
+  auto defaultEnv = GetTargetEnv();
 
   // create empty file for reading it back in later
   auto envOptions = EnvOptions(CurrentOptions());
@@ -115,40 +114,6 @@ TEST_F(DBEncryptionTest, ReadEmptyFile) {
   ASSERT_OK(status);
 
   ASSERT_TRUE(data.empty());
-}
-
-TEST_F(DBEncryptionTest, NotSupportedGetFileSize) {
-  // Validate envrypted env does not support GetFileSize.
-  // The goal of the test is to validate the encrypted env/fs does not support
-  // GetFileSize API on FSRandomAccessFile interface.
-  // This test combined with the rest of the integration tests validate that
-  // the new API GetFileSize on FSRandomAccessFile interface is not required to
-  // be supported for database to work properly.
-  // The GetFileSize API is used in ReadFooterFromFile() API to get the file
-  // size. When GetFileSize API is not supported, the ReadFooterFromFile() API
-  // will use FileSystem GetFileSize API as fallback. Refer to the
-  // EncryptedRandomAccessFile class definition for more details.
-  if (!encrypted_env_) {
-    return;
-  }
-
-  auto fs = encrypted_env_->GetFileSystem();
-
-  // create empty file for reading it back in later
-  auto filePath = dbname_ + "/empty.empty";
-
-  // Create empty file
-  CreateFile(fs.get(), filePath, "", false);
-
-  // Open it for reading footer
-  std::unique_ptr<FSRandomAccessFile> randomAccessFile;
-  auto status = fs->NewRandomAccessFile(filePath, FileOptions(),
-                                        &randomAccessFile, nullptr);
-  ASSERT_OK(status);
-
-  uint64_t fileSize;
-  status = randomAccessFile->GetFileSize(&fileSize);
-  ASSERT_TRUE(status.IsNotSupported());
 }
 
 }  // namespace ROCKSDB_NAMESPACE

@@ -77,12 +77,7 @@ void EventHelpers::LogAndNotifyTableFileCreationFinished(
     TableFileCreationReason reason, const Status& s,
     const std::string& file_checksum,
     const std::string& file_checksum_func_name) {
-  if (!event_logger && listeners.empty()) {
-    s.PermitUncheckedError();
-    return;
-  }
-
-  if (event_logger) {
+  if (s.ok() && event_logger) {
     JSONWriter jwriter;
     AppendCurrentTime(&jwriter);
     jwriter << "cf_name" << cf_name << "job" << job_id << "event"
@@ -129,7 +124,6 @@ void EventHelpers::LogAndNotifyTableFileCreationFinished(
               << "user_defined_timestamps_persisted"
               << table_properties.user_defined_timestamps_persisted
               << "key_largest_seqno" << table_properties.key_largest_seqno
-              << "key_smallest_seqno" << table_properties.key_smallest_seqno
               << "merge_operator" << table_properties.merge_operator_name
               << "prefix_extractor_name"
               << table_properties.prefix_extractor_name << "property_collectors"
@@ -171,8 +165,6 @@ void EventHelpers::LogAndNotifyTableFileCreationFinished(
       jwriter << "oldest_blob_file_number" << oldest_blob_file_number;
     }
 
-    jwriter << "status" << s.ToString();
-
     jwriter.EndObject();
 
     event_logger->Log(jwriter);
@@ -203,22 +195,18 @@ void EventHelpers::LogAndNotifyTableFileDeletion(
     const std::string& file_path, const Status& status,
     const std::string& dbname,
     const std::vector<std::shared_ptr<EventListener>>& listeners) {
-  if (!event_logger && listeners.empty()) {
-    status.PermitUncheckedError();
-    return;
+  JSONWriter jwriter;
+  AppendCurrentTime(&jwriter);
+
+  jwriter << "job" << job_id << "event" << "table_file_deletion"
+          << "file_number" << file_number;
+  if (!status.ok()) {
+    jwriter << "status" << status.ToString();
   }
 
-  if (event_logger) {
-    JSONWriter jwriter;
-    AppendCurrentTime(&jwriter);
+  jwriter.EndObject();
 
-    jwriter << "job" << job_id << "event" << "table_file_deletion"
-            << "file_number" << file_number << "status" << status.ToString();
-
-    jwriter.EndObject();
-
-    event_logger->Log(jwriter);
-  }
+  event_logger->Log(jwriter);
 
   if (listeners.empty()) {
     return;
@@ -286,12 +274,7 @@ void EventHelpers::LogAndNotifyBlobFileCreationFinished(
     const std::string& file_checksum,
     const std::string& file_checksum_func_name, uint64_t total_blob_count,
     uint64_t total_blob_bytes) {
-  if (!event_logger && listeners.empty()) {
-    s.PermitUncheckedError();
-    return;
-  }
-
-  if (event_logger) {
+  if (s.ok() && event_logger) {
     JSONWriter jwriter;
     AppendCurrentTime(&jwriter);
     jwriter << "cf_name" << cf_name << "job" << job_id << "event"
@@ -322,17 +305,15 @@ void EventHelpers::LogAndNotifyBlobFileDeletion(
     const std::vector<std::shared_ptr<EventListener>>& listeners, int job_id,
     uint64_t file_number, const std::string& file_path, const Status& status,
     const std::string& dbname) {
-  if (!event_logger && listeners.empty()) {
-    status.PermitUncheckedError();
-    return;
-  }
-
   if (event_logger) {
     JSONWriter jwriter;
     AppendCurrentTime(&jwriter);
 
     jwriter << "job" << job_id << "event" << "blob_file_deletion"
-            << "file_number" << file_number << "status" << status.ToString();
+            << "file_number" << file_number;
+    if (!status.ok()) {
+      jwriter << "status" << status.ToString();
+    }
 
     jwriter.EndObject();
     event_logger->Log(jwriter);

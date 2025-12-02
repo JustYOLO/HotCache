@@ -124,18 +124,6 @@ static std::unordered_map<std::string, OptionTypeInfo>
          {offsetof(struct MutableDBOptions, max_background_flushes),
           OptionType::kInt, OptionVerificationType::kNormal,
           OptionTypeFlags::kMutable}},
-        {"max_manifest_file_size",
-         {offsetof(struct MutableDBOptions, max_manifest_file_size),
-          OptionType::kUInt64T, OptionVerificationType::kNormal,
-          OptionTypeFlags::kMutable}},
-        {"max_manifest_space_amp_pct",
-         {offsetof(struct MutableDBOptions, max_manifest_space_amp_pct),
-          OptionType::kInt, OptionVerificationType::kNormal,
-          OptionTypeFlags::kMutable}},
-        {"manifest_preallocation_size",
-         {offsetof(struct MutableDBOptions, manifest_preallocation_size),
-          OptionType::kSizeT, OptionVerificationType::kNormal,
-          OptionTypeFlags::kMutable}},
         {"daily_offpeak_time_utc",
          {offsetof(struct MutableDBOptions, daily_offpeak_time_utc),
           OptionType::kString, OptionVerificationType::kNormal,
@@ -153,7 +141,6 @@ static std::unordered_map<std::string, OptionTypeInfo>
           std::shared_ptr<Statistics> statistics;
           std::vector<DbPath> db_paths;
           FileTypeSet checksum_handoff_file_types;
-          CompactionStyleSet calculate_sst_write_lifetime_hint_set;
          */
         {"advise_random_on_open",
          {offsetof(struct ImmutableDBOptions, advise_random_on_open),
@@ -243,10 +230,6 @@ static std::unordered_map<std::string, OptionTypeInfo>
                    track_and_verify_wals_in_manifest),
           OptionType::kBoolean, OptionVerificationType::kNormal,
           OptionTypeFlags::kNone}},
-        {"track_and_verify_wals",
-         {offsetof(struct ImmutableDBOptions, track_and_verify_wals),
-          OptionType::kBoolean, OptionVerificationType::kNormal,
-          OptionTypeFlags::kNone}},
         {"verify_sst_unique_id_in_manifest",
          {offsetof(struct ImmutableDBOptions, verify_sst_unique_id_in_manifest),
           OptionType::kBoolean, OptionVerificationType::kNormal,
@@ -267,7 +250,8 @@ static std::unordered_map<std::string, OptionTypeInfo>
          {0, OptionType::kBoolean, OptionVerificationType::kDeprecated,
           OptionTypeFlags::kNone}},
         {"random_access_max_buffer_size",
-         {0, OptionType::kSizeT, OptionVerificationType::kDeprecated,
+         {offsetof(struct ImmutableDBOptions, random_access_max_buffer_size),
+          OptionType::kSizeT, OptionVerificationType::kNormal,
           OptionTypeFlags::kNone}},
         {"use_adaptive_mutex",
          {offsetof(struct ImmutableDBOptions, use_adaptive_mutex),
@@ -300,6 +284,10 @@ static std::unordered_map<std::string, OptionTypeInfo>
          {offsetof(struct ImmutableDBOptions, log_file_time_to_roll),
           OptionType::kSizeT, OptionVerificationType::kNormal,
           OptionTypeFlags::kNone}},
+        {"manifest_preallocation_size",
+         {offsetof(struct ImmutableDBOptions, manifest_preallocation_size),
+          OptionType::kSizeT, OptionVerificationType::kNormal,
+          OptionTypeFlags::kNone}},
         {"max_log_file_size",
          {offsetof(struct ImmutableDBOptions, max_log_file_size),
           OptionType::kSizeT, OptionVerificationType::kNormal,
@@ -318,12 +306,17 @@ static std::unordered_map<std::string, OptionTypeInfo>
          {offsetof(struct ImmutableDBOptions, WAL_ttl_seconds),
           OptionType::kUInt64T, OptionVerificationType::kNormal,
           OptionTypeFlags::kNone}},
+        {"max_manifest_file_size",
+         {offsetof(struct ImmutableDBOptions, max_manifest_file_size),
+          OptionType::kUInt64T, OptionVerificationType::kNormal,
+          OptionTypeFlags::kNone}},
         {"persist_stats_to_disk",
          {offsetof(struct ImmutableDBOptions, persist_stats_to_disk),
           OptionType::kBoolean, OptionVerificationType::kNormal,
           OptionTypeFlags::kNone}},
         {"fail_if_options_file_error",
-         {0, OptionType::kBoolean, OptionVerificationType::kDeprecated,
+         {offsetof(struct ImmutableDBOptions, fail_if_options_file_error),
+          OptionType::kBoolean, OptionVerificationType::kNormal,
           OptionTypeFlags::kNone}},
         {"enable_pipelined_write",
          {offsetof(struct ImmutableDBOptions, enable_pipelined_write),
@@ -661,7 +654,7 @@ class DBOptionsConfigurable : public MutableDBConfigurable {
   explicit DBOptionsConfigurable(
       const DBOptions& opts,
       const std::unordered_map<std::string, std::string>* map = nullptr)
-      : MutableDBConfigurable(MutableDBOptions{opts}, map), db_options_(opts) {
+      : MutableDBConfigurable(MutableDBOptions(opts), map), db_options_(opts) {
     // The ImmutableDBOptions currently requires the env to be non-null.  Make
     // sure it is
     if (opts.env != nullptr) {
@@ -712,7 +705,7 @@ std::unique_ptr<Configurable> DBOptionsAsConfigurable(
   return ptr;
 }
 
-ImmutableDBOptions::ImmutableDBOptions() : ImmutableDBOptions(DBOptions{}) {}
+ImmutableDBOptions::ImmutableDBOptions() : ImmutableDBOptions(Options()) {}
 
 ImmutableDBOptions::ImmutableDBOptions(const DBOptions& options)
     : create_if_missing(options.create_if_missing),
@@ -723,7 +716,6 @@ ImmutableDBOptions::ImmutableDBOptions(const DBOptions& options)
       compaction_verify_record_count(options.compaction_verify_record_count),
       track_and_verify_wals_in_manifest(
           options.track_and_verify_wals_in_manifest),
-      track_and_verify_wals(options.track_and_verify_wals),
       verify_sst_unique_id_in_manifest(
           options.verify_sst_unique_id_in_manifest),
       env(options.env),
@@ -741,11 +733,13 @@ ImmutableDBOptions::ImmutableDBOptions(const DBOptions& options)
       log_file_time_to_roll(options.log_file_time_to_roll),
       keep_log_file_num(options.keep_log_file_num),
       recycle_log_file_num(options.recycle_log_file_num),
+      max_manifest_file_size(options.max_manifest_file_size),
       table_cache_numshardbits(options.table_cache_numshardbits),
       WAL_ttl_seconds(options.WAL_ttl_seconds),
       WAL_size_limit_MB(options.WAL_size_limit_MB),
       max_write_batch_group_size_bytes(
           options.max_write_batch_group_size_bytes),
+      manifest_preallocation_size(options.manifest_preallocation_size),
       allow_mmap_reads(options.allow_mmap_reads),
       allow_mmap_writes(options.allow_mmap_writes),
       use_direct_reads(options.use_direct_reads),
@@ -756,6 +750,7 @@ ImmutableDBOptions::ImmutableDBOptions(const DBOptions& options)
       advise_random_on_open(options.advise_random_on_open),
       db_write_buffer_size(options.db_write_buffer_size),
       write_buffer_manager(options.write_buffer_manager),
+      random_access_max_buffer_size(options.random_access_max_buffer_size),
       use_adaptive_mutex(options.use_adaptive_mutex),
       listeners(options.listeners),
       enable_thread_tracking(options.enable_thread_tracking),
@@ -773,6 +768,7 @@ ImmutableDBOptions::ImmutableDBOptions(const DBOptions& options)
       allow_2pc(options.allow_2pc),
       row_cache(options.row_cache),
       wal_filter(options.wal_filter),
+      fail_if_options_file_error(options.fail_if_options_file_error),
       dump_malloc_stats(options.dump_malloc_stats),
       avoid_flush_during_recovery(options.avoid_flush_during_recovery),
       allow_ingest_behind(options.allow_ingest_behind),
@@ -803,8 +799,7 @@ ImmutableDBOptions::ImmutableDBOptions(const DBOptions& options)
       follower_catchup_retry_wait_ms(options.follower_catchup_retry_wait_ms),
       metadata_write_temperature(options.metadata_write_temperature),
       wal_write_temperature(options.wal_write_temperature),
-      calculate_sst_write_lifetime_hint_set(
-          options.calculate_sst_write_lifetime_hint_set) {
+      enable_memtable_logging(options.enable_memtable_logging) {
   fs = env->GetFileSystem();
   clock = env->GetSystemClock().get();
   logger = info_log.get();
@@ -826,10 +821,6 @@ void ImmutableDBOptions::Dump(Logger* log) const {
                    "                              "
                    "Options.track_and_verify_wals_in_manifest: %d",
                    track_and_verify_wals_in_manifest);
-  ROCKS_LOG_HEADER(log,
-                   "                              "
-                   "Options.track_and_verify_wals: %d",
-                   track_and_verify_wals);
   ROCKS_LOG_HEADER(log, "       Options.verify_sst_unique_id_in_manifest: %d",
                    verify_sst_unique_id_in_manifest);
   ROCKS_LOG_HEADER(log, "                                    Options.env: %p",
@@ -852,6 +843,9 @@ void ImmutableDBOptions::Dump(Logger* log) const {
   ROCKS_LOG_HEADER(
       log, "                      Options.max_log_file_size: %" ROCKSDB_PRIszt,
       max_log_file_size);
+  ROCKS_LOG_HEADER(log,
+                   "                 Options.max_manifest_file_size: %" PRIu64,
+                   max_manifest_file_size);
   ROCKS_LOG_HEADER(
       log, "                  Options.log_file_time_to_roll: %" ROCKSDB_PRIszt,
       log_file_time_to_roll);
@@ -891,6 +885,9 @@ void ImmutableDBOptions::Dump(Logger* log) const {
                    "                       "
                    "Options.max_write_batch_group_size_bytes: %" PRIu64,
                    max_write_batch_group_size_bytes);
+  ROCKS_LOG_HEADER(
+      log, "            Options.manifest_preallocation_size: %" ROCKSDB_PRIszt,
+      manifest_preallocation_size);
   ROCKS_LOG_HEADER(log, "                    Options.is_fd_close_on_exec: %d",
                    is_fd_close_on_exec);
   ROCKS_LOG_HEADER(log, "                  Options.advise_random_on_open: %d",
@@ -900,6 +897,9 @@ void ImmutableDBOptions::Dump(Logger* log) const {
       db_write_buffer_size);
   ROCKS_LOG_HEADER(log, "                   Options.write_buffer_manager: %p",
                    write_buffer_manager.get());
+  ROCKS_LOG_HEADER(
+      log, "          Options.random_access_max_buffer_size: %" ROCKSDB_PRIszt,
+      random_access_max_buffer_size);
   ROCKS_LOG_HEADER(log, "                     Options.use_adaptive_mutex: %d",
                    use_adaptive_mutex);
   ROCKS_LOG_HEADER(log, "                           Options.rate_limiter: %p",
@@ -1021,7 +1021,24 @@ const std::string& ImmutableDBOptions::GetWalDir(
   }
 }
 
-MutableDBOptions::MutableDBOptions() : MutableDBOptions(DBOptions{}) {}
+MutableDBOptions::MutableDBOptions()
+    : max_background_jobs(2),
+      max_background_compactions(-1),
+      max_subcompactions(0),
+      avoid_flush_during_shutdown(false),
+      writable_file_max_buffer_size(1024 * 1024),
+      delayed_write_rate(2 * 1024U * 1024U),
+      max_total_wal_size(0),
+      delete_obsolete_files_period_micros(6ULL * 60 * 60 * 1000000),
+      stats_dump_period_sec(600),
+      stats_persist_period_sec(600),
+      stats_history_buffer_size(1024 * 1024),
+      max_open_files(-1),
+      bytes_per_sync(0),
+      wal_bytes_per_sync(0),
+      strict_bytes_per_sync(false),
+      compaction_readahead_size(0),
+      max_background_flushes(-1) {}
 
 MutableDBOptions::MutableDBOptions(const DBOptions& options)
     : max_background_jobs(options.max_background_jobs),
@@ -1042,9 +1059,6 @@ MutableDBOptions::MutableDBOptions(const DBOptions& options)
       strict_bytes_per_sync(options.strict_bytes_per_sync),
       compaction_readahead_size(options.compaction_readahead_size),
       max_background_flushes(options.max_background_flushes),
-      max_manifest_file_size(options.max_manifest_file_size),
-      max_manifest_space_amp_pct(options.max_manifest_space_amp_pct),
-      manifest_preallocation_size(options.manifest_preallocation_size),
       daily_offpeak_time_utc(options.daily_offpeak_time_utc) {}
 
 void MutableDBOptions::Dump(Logger* log) const {
@@ -1089,15 +1103,6 @@ void MutableDBOptions::Dump(Logger* log) const {
                    compaction_readahead_size);
   ROCKS_LOG_HEADER(log, "                 Options.max_background_flushes: %d",
                    max_background_flushes);
-  ROCKS_LOG_HEADER(log,
-                   "                 Options.max_manifest_file_size: %" PRIu64,
-                   max_manifest_file_size);
-  ROCKS_LOG_HEADER(log,
-                   "                 Options.max_manifest_space_amp_pct: %d",
-                   max_manifest_space_amp_pct);
-  ROCKS_LOG_HEADER(
-      log, "            Options.manifest_preallocation_size: %" ROCKSDB_PRIszt,
-      manifest_preallocation_size);
   ROCKS_LOG_HEADER(log, "Options.daily_offpeak_time_utc: %s",
                    daily_offpeak_time_utc.c_str());
 }

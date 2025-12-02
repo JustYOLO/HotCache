@@ -399,10 +399,10 @@ IOStatus TestFSWritableFile::RangeSync(uint64_t offset, uint64_t nbytes,
   return io_s;
 }
 
-TestFSRandomRWFile::TestFSRandomRWFile(const std::string& fname,
+TestFSRandomRWFile::TestFSRandomRWFile(const std::string& /*fname*/,
                                        std::unique_ptr<FSRandomRWFile>&& f,
                                        FaultInjectionTestFS* fs)
-    : fname_(fname), target_(std::move(f)), file_opened_(true), fs_(fs) {
+    : target_(std::move(f)), file_opened_(true), fs_(fs) {
   assert(target_ != nullptr);
 }
 
@@ -433,7 +433,6 @@ IOStatus TestFSRandomRWFile::Read(uint64_t offset, size_t n,
 
 IOStatus TestFSRandomRWFile::Close(const IOOptions& options,
                                    IODebugContext* dbg) {
-  fs_->RandomRWFileClosed(fname_);
   if (!fs_->IsFilesystemActive()) {
     return fs_->GetError();
   }
@@ -458,9 +457,9 @@ IOStatus TestFSRandomRWFile::Sync(const IOOptions& options,
 }
 
 TestFSRandomAccessFile::TestFSRandomAccessFile(
-    const std::string& fname, std::unique_ptr<FSRandomAccessFile>&& f,
+    const std::string& /*fname*/, std::unique_ptr<FSRandomAccessFile>&& f,
     FaultInjectionTestFS* fs)
-    : target_(std::move(f)), fs_(fs), is_sst_(EndsWith(fname, ".sst")) {
+    : target_(std::move(f)), fs_(fs) {
   assert(target_ != nullptr);
 }
 
@@ -560,14 +559,6 @@ size_t TestFSRandomAccessFile::GetUniqueId(char* id, size_t max_size) const {
     return 0;
   } else {
     return target_->GetUniqueId(id, max_size);
-  }
-}
-
-IOStatus TestFSRandomAccessFile::GetFileSize(uint64_t* file_size) {
-  if (is_sst_ && fs_->ShouldFailRandomAccessGetFileSizeSst()) {
-    return IOStatus::IOError("FSRandomAccessFile::GetFileSize failed");
-  } else {
-    return target_->GetFileSize(file_size);
   }
 }
 
@@ -1065,9 +1056,6 @@ IOStatus FaultInjectionTestFS::GetFileSize(const std::string& f,
                                            const IOOptions& options,
                                            uint64_t* file_size,
                                            IODebugContext* dbg) {
-  if (EndsWith(f, ".sst") && ShouldFailFilesystemGetFileSizeSst()) {
-    return IOStatus::IOError("FileSystem::GetFileSize failed");
-  }
   if (!IsFilesystemActive()) {
     return GetError();
   }
@@ -1277,13 +1265,6 @@ IOStatus FaultInjectionTestFS::AbortIO(std::vector<void*>& io_handles) {
   return target()->AbortIO(io_handles);
 }
 
-void FaultInjectionTestFS::RandomRWFileClosed(const std::string& fname) {
-  MutexLock l(&mutex_);
-  if (open_managed_files_.find(fname) != open_managed_files_.end()) {
-    open_managed_files_.erase(fname);
-  }
-}
-
 void FaultInjectionTestFS::WritableFileClosed(const FSFileState& state) {
   MutexLock l(&mutex_);
   if (open_managed_files_.find(state.filename_) != open_managed_files_.end()) {
@@ -1398,7 +1379,7 @@ IOStatus FaultInjectionTestFS::MaybeInjectThreadLocalReadError(
   ErrorContext* ctx =
       static_cast<ErrorContext*>(injected_thread_local_read_error_.Get());
   if (ctx == nullptr || !ctx->enable_error_injection || !ctx->one_in ||
-      ShouldIOActivitiesExcludedFromFaultInjection(io_options.io_activity)) {
+      ShouldIOActivtiesExcludedFromFaultInjection(io_options.io_activity)) {
     return IOStatus::OK();
   }
 
@@ -1431,7 +1412,6 @@ IOStatus FaultInjectionTestFS::MaybeInjectThreadLocalReadError(
       msg << "empty result";
       ctx->message = msg.str();
       ret_fault_injected = true;
-      ret = IOStatus::IOError(ctx->message);
     } else if (!direct_io && Random::GetTLSInstance()->OneIn(7) &&
                scratch != nullptr && result->data() == scratch) {
       assert(result);
@@ -1450,7 +1430,6 @@ IOStatus FaultInjectionTestFS::MaybeInjectThreadLocalReadError(
       msg << "corrupt last byte";
       ctx->message = msg.str();
       ret_fault_injected = true;
-      ret = IOStatus::IOError(ctx->message);
     } else {
       msg << "error result multiget single";
       ctx->message = msg.str();
@@ -1484,7 +1463,7 @@ IOStatus FaultInjectionTestFS::MaybeInjectThreadLocalError(
 
   ErrorContext* ctx = GetErrorContextFromFaultInjectionIOType(type);
   if (ctx == nullptr || !ctx->enable_error_injection || !ctx->one_in ||
-      ShouldIOActivitiesExcludedFromFaultInjection(io_options.io_activity) ||
+      ShouldIOActivtiesExcludedFromFaultInjection(io_options.io_activity) ||
       (type == FaultInjectionIOType::kWrite &&
        ShouldExcludeFromWriteFaultInjection(file_name))) {
     return IOStatus::OK();

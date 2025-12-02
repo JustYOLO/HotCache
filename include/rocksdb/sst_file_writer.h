@@ -15,6 +15,12 @@
 #include "rocksdb/types.h"
 #include "rocksdb/wide_columns.h"
 
+#if defined(__GNUC__) || defined(__clang__)
+#define ROCKSDB_DEPRECATED_FUNC __attribute__((__deprecated__))
+#elif _WIN32
+#define ROCKSDB_DEPRECATED_FUNC __declspec(deprecated)
+#endif
+
 namespace ROCKSDB_NAMESPACE {
 
 class Comparator;
@@ -111,7 +117,7 @@ class SstFileWriter {
   // REQUIRES: user_key is after any previously added point (Put/Merge/Delete)
   //           key according to the comparator.
   // REQUIRES: comparator is *not* timestamp-aware.
-  [[deprecated]] Status Add(const Slice& user_key, const Slice& value);
+  ROCKSDB_DEPRECATED_FUNC Status Add(const Slice& user_key, const Slice& value);
 
   // Add a Put key with value to currently opened file
   // REQUIRES: user_key is after any previously added point (Put/Merge/Delete)

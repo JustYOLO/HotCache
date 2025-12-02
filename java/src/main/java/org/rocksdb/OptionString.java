@@ -19,8 +19,6 @@ public class OptionString {
   private static final char wrappedValueEnd = '}';
   private static final char arrayValueSeparator = ':';
 
-  private static final char escapeChar = '\\';
-
   static class Value {
     final List<String> list;
     final List<Entry> complex;
@@ -179,9 +177,6 @@ public class OptionString {
       final List<String> list = new ArrayList<>(1);
       while (true) {
         list.add(parseSimpleValue());
-        if (isChar(escapeChar)) {
-          next();
-        }
         if (!isChar(arrayValueSeparator))
           break;
 

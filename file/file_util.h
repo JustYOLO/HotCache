@@ -24,28 +24,18 @@ IOStatus CopyFile(FileSystem* fs, const std::string& source,
                   Temperature src_temp_hint,
                   std::unique_ptr<WritableFileWriter>& dest_writer,
                   uint64_t size, bool use_fsync,
-                  const std::shared_ptr<IOTracer>& io_tracer,
-                  uint64_t max_read_buffer_size = 4096,
-                  const std::optional<IOOptions>& readIOOptions = {},
-                  const std::optional<IOOptions>& writeIOOptions = {});
+                  const std::shared_ptr<IOTracer>& io_tracer);
 IOStatus CopyFile(FileSystem* fs, const std::string& source,
                   Temperature src_temp_hint, const std::string& destination,
                   Temperature dst_temp, uint64_t size, bool use_fsync,
-                  const std::shared_ptr<IOTracer>& io_tracer,
-                  uint64_t max_read_buffer_size = 4096,
-                  const std::optional<IOOptions>& readIOOptions = {},
-                  const std::optional<IOOptions>& writeIOOptions = {});
+                  const std::shared_ptr<IOTracer>& io_tracer);
 inline IOStatus CopyFile(const std::shared_ptr<FileSystem>& fs,
                          const std::string& source, Temperature src_temp_hint,
                          const std::string& destination, Temperature dst_temp,
                          uint64_t size, bool use_fsync,
-                         const std::shared_ptr<IOTracer>& io_tracer,
-                         uint64_t max_read_buffer_size = 4096,
-                         const std::optional<IOOptions>& readIOOptions = {},
-                         const std::optional<IOOptions>& writeIOOptions = {}) {
+                         const std::shared_ptr<IOTracer>& io_tracer) {
   return CopyFile(fs.get(), source, src_temp_hint, destination, dst_temp, size,
-                  use_fsync, io_tracer, max_read_buffer_size, readIOOptions,
-                  writeIOOptions);
+                  use_fsync, io_tracer);
 }
 IOStatus CreateFile(FileSystem* fs, const std::string& destination,
                     const std::string& contents, bool use_fsync);
@@ -86,14 +76,7 @@ IOStatus GenerateOneFileChecksum(
     const ReadOptions& read_options, Statistics* stats, SystemClock* clock);
 
 inline IOStatus PrepareIOFromReadOptions(const ReadOptions& ro,
-                                         SystemClock* clock, IOOptions& opts,
-                                         IODebugContext* dbg = nullptr) {
-  if (ro.request_id != nullptr) {
-    if (dbg != nullptr && dbg->request_id == nullptr) {
-      dbg->SetRequestId(ro.request_id);
-    }
-  }
-
+                                         SystemClock* clock, IOOptions& opts) {
   if (ro.deadline.count()) {
     std::chrono::microseconds now =
         std::chrono::microseconds(clock->NowMicros());

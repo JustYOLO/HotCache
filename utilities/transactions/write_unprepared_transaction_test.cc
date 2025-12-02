@@ -13,43 +13,37 @@ class WriteUnpreparedTransactionTestBase : public TransactionTestBase {
  public:
   WriteUnpreparedTransactionTestBase(bool use_stackable_db,
                                      bool two_write_queue,
-                                     TxnDBWritePolicy write_policy,
-                                     bool use_per_key_point_lock_mgr,
-                                     int64_t deadlock_timeout_us)
+                                     TxnDBWritePolicy write_policy)
       : TransactionTestBase(use_stackable_db, two_write_queue, write_policy,
-                            kOrderedWrite, use_per_key_point_lock_mgr,
-                            deadlock_timeout_us) {}
+                            kOrderedWrite) {}
 };
 
 class WriteUnpreparedTransactionTest
     : public WriteUnpreparedTransactionTestBase,
       virtual public ::testing::WithParamInterface<
-          std::tuple<bool, bool, TxnDBWritePolicy, bool, int64_t>> {
+          std::tuple<bool, bool, TxnDBWritePolicy>> {
  public:
   WriteUnpreparedTransactionTest()
-      : WriteUnpreparedTransactionTestBase(
-            std::get<0>(GetParam()), std::get<1>(GetParam()),
-            std::get<2>(GetParam()), std::get<3>(GetParam()),
-            std::get<4>(GetParam())) {}
+      : WriteUnpreparedTransactionTestBase(std::get<0>(GetParam()),
+                                           std::get<1>(GetParam()),
+                                           std::get<2>(GetParam())) {}
 };
 
 INSTANTIATE_TEST_CASE_P(
     WriteUnpreparedTransactionTest, WriteUnpreparedTransactionTest,
-    ::testing::Combine(::testing::Values(false), ::testing::Bool(),
-                       ::testing::Values(WRITE_UNPREPARED), ::testing::Bool(),
-                       ::testing::Values(0, 1000)));
+    ::testing::Values(std::make_tuple(false, false, WRITE_UNPREPARED),
+                      std::make_tuple(false, true, WRITE_UNPREPARED)));
 
 enum SnapshotAction { NO_SNAPSHOT, RO_SNAPSHOT, REFRESH_SNAPSHOT };
 enum VerificationOperation { VERIFY_GET, VERIFY_NEXT, VERIFY_PREV };
 class WriteUnpreparedSnapshotTest
     : public WriteUnpreparedTransactionTestBase,
-      virtual public ::testing::WithParamInterface<std::tuple<
-          bool, SnapshotAction, VerificationOperation, bool, int64_t>> {
+      virtual public ::testing::WithParamInterface<
+          std::tuple<bool, SnapshotAction, VerificationOperation>> {
  public:
   WriteUnpreparedSnapshotTest()
-      : WriteUnpreparedTransactionTestBase(
-            false, std::get<0>(GetParam()), WRITE_UNPREPARED,
-            std::get<3>(GetParam()), std::get<4>(GetParam())),
+      : WriteUnpreparedTransactionTestBase(false, std::get<0>(GetParam()),
+                                           WRITE_UNPREPARED),
         action_(std::get<1>(GetParam())),
         verify_op_(std::get<2>(GetParam())) {}
   SnapshotAction action_;
@@ -62,11 +56,10 @@ class WriteUnpreparedSnapshotTest
 // verification operation
 INSTANTIATE_TEST_CASE_P(
     WriteUnpreparedSnapshotTest, WriteUnpreparedSnapshotTest,
-    ::testing::Combine(::testing::Bool(),
-                       ::testing::Values(NO_SNAPSHOT, RO_SNAPSHOT,
-                                         REFRESH_SNAPSHOT),
-                       ::testing::Values(VERIFY_GET, VERIFY_NEXT, VERIFY_PREV),
-                       ::testing::Bool(), ::testing::Values(0, 1000)));
+    ::testing::Combine(
+        ::testing::Bool(),
+        ::testing::Values(NO_SNAPSHOT, RO_SNAPSHOT, REFRESH_SNAPSHOT),
+        ::testing::Values(VERIFY_GET, VERIFY_NEXT, VERIFY_PREV)));
 
 TEST_P(WriteUnpreparedTransactionTest, ReadYourOwnWrite) {
   // The following tests checks whether reading your own write for

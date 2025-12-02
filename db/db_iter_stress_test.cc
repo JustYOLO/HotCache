@@ -528,11 +528,12 @@ TEST_F(DBIteratorStressTest, StressTest) {
                   internal_iter->target_hidden_fraction =
                       target_hidden_fraction;
                   internal_iter->trace = trace;
-                  db_iter.reset(DBIter::NewIter(
+                  db_iter.reset(NewDBIterator(
                       env_, ropt, ImmutableOptions(options),
                       MutableCFOptions(options), BytewiseComparator(),
-                      internal_iter, /*version=*/nullptr, sequence,
-                      nullptr /*read_callback*/, /*active_mem=*/nullptr));
+                      internal_iter, nullptr /* version */, sequence,
+                      options.max_sequential_skip_in_iterations,
+                      nullptr /*read_callback*/));
                 }
 
                 // Do a random operation. It's important to do it on ref_it

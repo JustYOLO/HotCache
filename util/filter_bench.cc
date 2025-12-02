@@ -145,6 +145,7 @@ using ROCKSDB_NAMESPACE::BlockContents;
 using ROCKSDB_NAMESPACE::BloomFilterPolicy;
 using ROCKSDB_NAMESPACE::BloomHash;
 using ROCKSDB_NAMESPACE::BloomLikeFilterPolicy;
+using ROCKSDB_NAMESPACE::BuiltinFilterBitsBuilder;
 using ROCKSDB_NAMESPACE::CachableEntry;
 using ROCKSDB_NAMESPACE::Cache;
 using ROCKSDB_NAMESPACE::CacheEntryRole;
@@ -152,7 +153,6 @@ using ROCKSDB_NAMESPACE::CacheEntryRoleOptions;
 using ROCKSDB_NAMESPACE::EncodeFixed32;
 using ROCKSDB_NAMESPACE::Env;
 using ROCKSDB_NAMESPACE::FastRange32;
-using ROCKSDB_NAMESPACE::FilterBitsBuilder;
 using ROCKSDB_NAMESPACE::FilterBitsReader;
 using ROCKSDB_NAMESPACE::FilterBuildingContext;
 using ROCKSDB_NAMESPACE::FilterPolicy;
@@ -393,7 +393,7 @@ void FilterBench::Go() {
 
   std::cout << "Building..." << std::endl;
 
-  std::unique_ptr<FilterBitsBuilder> builder;
+  std::unique_ptr<BuiltinFilterBitsBuilder> builder;
 
   size_t total_memory_used = 0;
   size_t total_size = 0;
@@ -440,7 +440,8 @@ void FilterBench::Go() {
       info.filter_ = info.plain_table_bloom_->GetRawData();
     } else {
       if (!builder) {
-        builder.reset(GetBuilder());
+        builder.reset(
+            static_cast_with_check<BuiltinFilterBitsBuilder>(GetBuilder()));
       }
       for (uint32_t i = 0; i < keys_to_add; ++i) {
         builder->AddKey(kms_[0].Get(filter_id, i));

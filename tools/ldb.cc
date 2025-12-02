@@ -8,5 +8,6 @@
 
 int main(int argc, char** argv) {
   ROCKSDB_NAMESPACE::LDBTool tool;
-  return tool.RunAndReturn(argc, argv);
+  tool.Run(argc, argv);
+  return 0;
 }

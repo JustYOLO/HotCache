@@ -100,10 +100,6 @@ class CompositeRandomAccessFileWrapper : public RandomAccessFile {
     return target_->InvalidateCache(offset, length);
   }
 
-  Status GetFileSize(uint64_t* size) override {
-    return target_->GetFileSize(size);
-  }
-
  private:
   std::unique_ptr<FSRandomAccessFile> target_;
 };

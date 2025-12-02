@@ -14,12 +14,26 @@
 namespace ROCKSDB_NAMESPACE {
 
 INSTANTIATE_TEST_CASE_P(
-    DBAsBaseDBAndStackableDB, WriteCommittedTxnWithTsTest,
-    ::testing::Combine(/*use_stackable_db=*/::testing::Bool(),
-                       /*two_write_queue=*/::testing::Bool(),
-                       /*enable_indexing=*/::testing::Bool(),
-                       /*use_per_key_point_lock_mgr=*/::testing::Bool(),
-                       /*deadlock_timeout_us=*/::testing::Values(0, 1000)));
+    DBAsBaseDB, WriteCommittedTxnWithTsTest,
+    ::testing::Values(std::make_tuple(false, /*two_write_queue=*/false,
+                                      /*enable_indexing=*/false),
+                      std::make_tuple(false, /*two_write_queue=*/true,
+                                      /*enable_indexing=*/false),
+                      std::make_tuple(false, /*two_write_queue=*/false,
+                                      /*enable_indexing=*/true),
+                      std::make_tuple(false, /*two_write_queue=*/true,
+                                      /*enable_indexing=*/true)));
+
+INSTANTIATE_TEST_CASE_P(
+    DBAsStackableDB, WriteCommittedTxnWithTsTest,
+    ::testing::Values(std::make_tuple(true, /*two_write_queue=*/false,
+                                      /*enable_indexing=*/false),
+                      std::make_tuple(true, /*two_write_queue=*/true,
+                                      /*enable_indexing=*/false),
+                      std::make_tuple(true, /*two_write_queue=*/false,
+                                      /*enable_indexing=*/true),
+                      std::make_tuple(true, /*two_write_queue=*/true,
+                                      /*enable_indexing=*/true)));
 
 TEST_P(WriteCommittedTxnWithTsTest, SanityChecks) {
   ASSERT_OK(ReOpenNoDelete());

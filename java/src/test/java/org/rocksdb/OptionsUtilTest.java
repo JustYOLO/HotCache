@@ -298,8 +298,6 @@ public class OptionsUtilTest {
     altCFTableConfig.setFormatVersion(8);
     altCFTableConfig.setEnableIndexCompression(false);
     altCFTableConfig.setBlockAlign(true);
-    altCFTableConfig.setSuperBlockAlignmentSize(1024 * 1024);
-    altCFTableConfig.setSuperBlockAlignmentSpaceOverheadRatio(4 * 1024);
     altCFTableConfig.setIndexShortening(IndexShorteningMode.kShortenSeparatorsAndSuccessor);
     altCFTableConfig.setBlockCacheSize(3 * 1024 * 1024);
     // Note cache objects are not set here, as they are not read back when reading config.
@@ -367,9 +365,6 @@ public class OptionsUtilTest {
     assertThat(actual.formatVersion()).isEqualTo(expected.formatVersion());
     assertThat(actual.enableIndexCompression()).isEqualTo(expected.enableIndexCompression());
     assertThat(actual.blockAlign()).isEqualTo(expected.blockAlign());
-    assertThat(actual.superBlockAlignmentSize()).isEqualTo(expected.superBlockAlignmentSize());
-    assertThat(actual.superBlockAlignmentSpaceOverheadRatio())
-        .isEqualTo(expected.superBlockAlignmentSpaceOverheadRatio());
     assertThat(actual.indexShortening()).isEqualTo(expected.indexShortening());
     if (expected.filterPolicy() == null) {
       assertThat(actual.filterPolicy()).isNull();

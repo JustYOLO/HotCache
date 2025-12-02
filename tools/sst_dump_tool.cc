@@ -8,18 +8,25 @@
 
 #include <cinttypes>
 #include <iostream>
-#include <regex>
 
-#include "db_stress_tool/db_stress_compression_manager.h"
 #include "options/options_helper.h"
 #include "port/port.h"
 #include "rocksdb/convenience.h"
 #include "rocksdb/utilities/ldb_cmd.h"
-#include "table/block_based/block.h"
-#include "table/block_based/block_based_table_factory.h"
 #include "table/sst_file_dumper.h"
 
 namespace ROCKSDB_NAMESPACE {
+
+static const std::vector<std::pair<CompressionType, const char*>>
+    kCompressions = {
+        {CompressionType::kNoCompression, "kNoCompression"},
+        {CompressionType::kSnappyCompression, "kSnappyCompression"},
+        {CompressionType::kZlibCompression, "kZlibCompression"},
+        {CompressionType::kBZip2Compression, "kBZip2Compression"},
+        {CompressionType::kLZ4Compression, "kLZ4Compression"},
+        {CompressionType::kLZ4HCCompression, "kLZ4HCCompression"},
+        {CompressionType::kXpressCompression, "kXpressCompression"},
+        {CompressionType::kZSTD, "kZSTD"}};
 
 namespace {
 
@@ -36,9 +43,9 @@ void print_help(bool to_stderr) {
   }
   fprintf(
       to_stderr ? stderr : stdout,
-      R"(sst_dump <db_dirs_OR_sst_files...> [--command=check|scan|raw|recompress|identify]
-    --file=<db_dir_OR_sst_file>
-      Path to SST file or directory containing SST files (old option syntax)
+      R"(sst_dump --file=<data_dir_OR_sst_file> [--command=check|scan|raw|recompress|identify]
+    --file=<data_dir_OR_sst_file>
+      Path to SST file or directory containing SST files
 
     --env_uri=<uri of underlying Env>
       URI of underlying Env, mutually exclusive with fs_uri
@@ -86,31 +93,19 @@ void print_help(bool to_stderr) {
       Print table properties after iterating over the file when executing
       check|scan|raw|identify
 
-    --block_size=<block_size>
+    --set_block_size=<block_size>
       Can be combined with --command=recompress to set the block size that will
       be used when trying different compression algorithms
 
     --compression_types=<comma-separated list of CompressionType members, e.g.,
-      kSnappyCompression or kCustomCompressionC4>
+      kSnappyCompression>
       Can be combined with --command=recompress to run recompression for this
       list of compression types
-      Supported built-in compression types: %s
-
-    --compression_manager=<compression manager string>
-      Used with --command=recompress to specify a compression manager to use
-      instead of the built-in compression manager, which may support a
-      different set of compression types.
-
-    --enable_index_compression=<bool>
-      Used with --command=recompress to specify whether to compress index
-      blocks (in addition to data blocks).
+      Supported compression types: %s
 
     --parse_internal_key=<0xKEY>
       Convenience option to parse an internal key on the command line. Dumps the
       internal key in hex format {'key' @ SN: type}
-
-    --compression_level=<compression_level>
-      Sets both --compression_level_from= and --compression_level_to=
 
     --compression_level_from=<compression_level>
       Compression level to start compressing when executing recompress. One compression type
@@ -120,23 +115,17 @@ void print_help(bool to_stderr) {
       Compression level to stop compressing when executing recompress. One compression type
       and compression_level_from must also be specified
 
-    --compression_max_dict_buffer_bytes=<int64_t>
-      Limit on buffer size from which we collect samples for dictionary generation.
-
     --compression_max_dict_bytes=<uint32_t>
       Maximum size of dictionary used to prime the compression library
-
-    --compression_parallel_threads=<uint32_t>
-      Number of parallel threads to use with --command=recompress
-
-    --compression_use_zstd_finalize_dict
-      Use zstd's finalizeDictionary() API instead of zstd's dictionary trainer to generate dictionary.
 
     --compression_zstd_max_train_bytes=<uint32_t>
       Maximum size of training data passed to zstd's dictionary trainer
 
-    --list_meta_blocks
-      Print the list of all meta blocks in the file
+    --compression_max_dict_buffer_bytes=<int64_t>
+      Limit on buffer size from which we collect samples for dictionary generation.
+
+    --compression_use_zstd_finalize_dict
+      Use zstd's finalizeDictionary() API instead of zstd's dictionary trainer to generate dictionary.
 )",
       supported_compressions.c_str());
 }
@@ -163,12 +152,7 @@ bool ParseIntArg(const char* arg, const std::string arg_name,
 
 int SSTDumpTool::Run(int argc, char const* const* argv, Options options) {
   std::string env_uri, fs_uri;
-  enum DirVsFile {
-    kUnknownDirVsFile,
-    kDir,
-    kFile,
-  };
-  std::vector<std::pair<const char*, DirVsFile>> dirs_or_files;
+  const char* dir_or_file = nullptr;
   uint64_t read_num = std::numeric_limits<uint64_t>::max();
   std::string command;
 
@@ -183,25 +167,18 @@ int SSTDumpTool::Run(int argc, char const* const* argv, Options options) {
   bool use_from_as_prefix = false;
   bool show_properties = false;
   bool show_summary = false;
-  bool list_meta_blocks = false;
+  bool set_block_size = false;
   bool has_compression_level_from = false;
   bool has_compression_level_to = false;
+  bool has_specified_compression_types = false;
   std::string from_key;
   std::string to_key;
   std::string block_size_str;
   std::string compression_level_from_str;
   std::string compression_level_to_str;
-  size_t block_size = 16384;  // A popular choice for default
+  size_t block_size = 0;
   size_t readahead_size = 2 * 1024 * 1024;
-  // These two options are intentionally secret options because they are
-  // niche ways to select files to get the "recompress" treatment. And even
-  // if std::regex is flawed, it should be good enough for these niche uses.
-  std::unique_ptr<std::regex> require_property_regex;
-  std::unique_ptr<std::regex> exclude_property_regex;
-  std::vector<CompressionType> compression_types;
-  std::shared_ptr<CompressionManager> compression_manager;
-  bool enable_index_compression =
-      BlockBasedTableOptions{}.enable_index_compression;
+  std::vector<std::pair<CompressionType, const char*>> compression_types;
   uint64_t total_num_files = 0;
   uint64_t total_num_data_blocks = 0;
   uint64_t total_data_block_size = 0;
@@ -217,12 +194,8 @@ int SSTDumpTool::Run(int argc, char const* const* argv, Options options) {
       ROCKSDB_NAMESPACE::CompressionOptions().max_dict_buffer_bytes;
   bool compression_use_zstd_finalize_dict =
       !ROCKSDB_NAMESPACE::CompressionOptions().use_zstd_dict_trainer;
-  uint32_t compression_parallel_threads = 1;
 
   int64_t tmp_val;
-
-  TEST_AllowUnsupportedFormatVersion() = true;
-  DbStressCustomCompressionManager::Register();
 
   for (int i = 1; i < argc; i++) {
     if (strncmp(argv[i], "--env_uri=", 10) == 0) {
@@ -230,7 +203,7 @@ int SSTDumpTool::Run(int argc, char const* const* argv, Options options) {
     } else if (strncmp(argv[i], "--fs_uri=", 9) == 0) {
       fs_uri = argv[i] + 9;
     } else if (strncmp(argv[i], "--file=", 7) == 0) {
-      dirs_or_files.emplace_back(argv[i] + 7, kUnknownDirVsFile);
+      dir_or_file = argv[i] + 7;
     } else if (strcmp(argv[i], "--output_hex") == 0) {
       output_hex = true;
     } else if (strcmp(argv[i], "--decode_blob_index") == 0) {
@@ -258,9 +231,8 @@ int SSTDumpTool::Run(int argc, char const* const* argv, Options options) {
     } else if (strcmp(argv[i], "--show_summary") == 0) {
       show_summary = true;
     } else if (ParseIntArg(argv[i], "--set_block_size=",
-                           "block size must be numeric", &tmp_val) ||
-               ParseIntArg(argv[i], "--block_size=",
                            "block size must be numeric", &tmp_val)) {
+      set_block_size = true;
       block_size = static_cast<size_t>(tmp_val);
     } else if (ParseIntArg(argv[i], "--readahead_size=",
                            "readahead_size must be numeric", &tmp_val)) {
@@ -269,46 +241,19 @@ int SSTDumpTool::Run(int argc, char const* const* argv, Options options) {
       std::string compression_types_csv = argv[i] + 20;
       std::istringstream iss(compression_types_csv);
       std::string compression_type;
-
+      has_specified_compression_types = true;
       while (std::getline(iss, compression_type, ',')) {
-        auto iter =
-            OptionsHelper::compression_type_string_map.find(compression_type);
-        if (iter == OptionsHelper::compression_type_string_map.end()) {
+        auto iter = std::find_if(
+            kCompressions.begin(), kCompressions.end(),
+            [&compression_type](std::pair<CompressionType, const char*> curr) {
+              return curr.second == compression_type;
+            });
+        if (iter == kCompressions.end()) {
           fprintf(stderr, "%s is not a valid CompressionType\n",
                   compression_type.c_str());
           exit(1);
         }
-        compression_types.emplace_back(iter->second);
-      }
-    } else if (strncmp(argv[i], "--require_property_regex=", 25) == 0) {
-      require_property_regex = std::make_unique<std::regex>(
-          argv[i] + 25, std::regex_constants::egrep);
-    } else if (strncmp(argv[i], "--exclude_property_regex=", 25) == 0) {
-      exclude_property_regex = std::make_unique<std::regex>(
-          argv[i] + 25, std::regex_constants::egrep);
-    } else if (strncmp(argv[i], "--compression_manager=", 22) == 0) {
-      std::string compression_manager_str = argv[i] + 22;
-      ConfigOptions config_options;
-      config_options.ignore_unsupported_options = false;
-      Status s = CompressionManager::CreateFromString(
-          config_options, compression_manager_str, &compression_manager);
-      if (!s.ok()) {
-        fprintf(stderr, "Failed to create compression manager: %s\n",
-                s.ToString().c_str());
-        exit(1);
-      }
-      if (compression_manager == nullptr) {
-        fprintf(stderr, "No compression manager created: %s\n",
-                compression_manager_str.c_str());
-        exit(1);
-      }
-      options.compression_manager = compression_manager;
-      printf("Using compression manager: %s\n",
-             compression_manager->GetId().c_str());
-    } else if (strncmp(argv[i], "--enable_index_compression=", 27) == 0) {
-      if (strlen(argv[i]) > 27) {
-        enable_index_compression =
-            argv[i][27] == '1' || argv[i][27] == 't' || argv[i][27] == 'T';
+        compression_types.emplace_back(*iter);
       }
     } else if (strncmp(argv[i], "--parse_internal_key=", 21) == 0) {
       std::string in_key(argv[i] + 21);
@@ -331,12 +276,6 @@ int SSTDumpTool::Run(int argc, char const* const* argv, Options options) {
       }
       fprintf(stdout, "key=%s\n", ikey.DebugString(true, true).c_str());
       return retc;
-    } else if (ParseIntArg(argv[i], "--compression_level=",
-                           "compression_level must be numeric", &tmp_val)) {
-      has_compression_level_from = true;
-      has_compression_level_to = true;
-      compress_level_from = static_cast<int>(tmp_val);
-      compress_level_to = static_cast<int>(tmp_val);
     } else if (ParseIntArg(argv[i], "--compression_level_from=",
                            "compression_level_from must be numeric",
                            &tmp_val)) {
@@ -356,16 +295,6 @@ int SSTDumpTool::Run(int argc, char const* const* argv, Options options) {
         return 1;
       }
       compression_max_dict_bytes = static_cast<uint32_t>(tmp_val);
-    } else if (ParseIntArg(argv[i], "--compression_parallel_threads=",
-                           "compression_parallel_threads must be numeric",
-                           &tmp_val)) {
-      if (tmp_val < 0 || tmp_val > 100) {
-        fprintf(stderr, "compression_parallel_threads out of range: '%s'\n",
-                argv[i]);
-        print_help(/*to_stderr*/ true);
-        return 1;
-      }
-      compression_parallel_threads = static_cast<uint32_t>(tmp_val);
     } else if (ParseIntArg(argv[i], "--compression_zstd_max_train_bytes=",
                            "compression_zstd_max_train_bytes must be numeric",
                            &tmp_val)) {
@@ -390,30 +319,25 @@ int SSTDumpTool::Run(int argc, char const* const* argv, Options options) {
       compression_max_dict_buffer_bytes = static_cast<uint64_t>(tmp_val);
     } else if (strcmp(argv[i], "--compression_use_zstd_finalize_dict") == 0) {
       compression_use_zstd_finalize_dict = true;
-    } else if (strcmp(argv[i], "--list_meta_blocks") == 0) {
-      list_meta_blocks = true;
     } else if (strcmp(argv[i], "--help") == 0) {
       print_help(/*to_stderr*/ false);
       return 0;
     } else if (strcmp(argv[i], "--version") == 0) {
       printf("%s\n", GetRocksBuildInfoAsString("sst_dump").c_str());
       return 0;
-    } else if (strcmp(argv[i], "--") == 0) {
-      // Remaining args are dir-or-file
-      for (++i; i < argc; ++i) {
-        dirs_or_files.emplace_back(argv[i], kUnknownDirVsFile);
-      }
-    } else if (argv[i][0] == '-') {
+    } else {
       fprintf(stderr, "Unrecognized argument '%s'\n\n", argv[i]);
       print_help(/*to_stderr*/ true);
       return 1;
-    } else {
-      // Dir-or-file arg
-      dirs_or_files.emplace_back(argv[i], kUnknownDirVsFile);
     }
   }
 
-  if (has_compression_level_from ^ has_compression_level_to) {
+  if (has_compression_level_from && has_compression_level_to) {
+    if (!has_specified_compression_types || compression_types.size() != 1) {
+      fprintf(stderr, "Specify one compression type.\n\n");
+      exit(1);
+    }
+  } else if (has_compression_level_from || has_compression_level_to) {
     fprintf(stderr,
             "Specify both --compression_level_from and "
             "--compression_level_to.\n\n");
@@ -434,7 +358,7 @@ int SSTDumpTool::Run(int argc, char const* const* argv, Options options) {
     }
   }
 
-  if (dirs_or_files.empty()) {
+  if (dir_or_file == nullptr) {
     fprintf(stderr, "file or directory must be specified.\n\n");
     print_help(/*to_stderr*/ true);
     exit(1);
@@ -460,35 +384,26 @@ int SSTDumpTool::Run(int argc, char const* const* argv, Options options) {
 
   std::vector<std::string> filenames;
   ROCKSDB_NAMESPACE::Env* env = options.env;
-  ROCKSDB_NAMESPACE::Status st;
-
-  for (size_t i = 0; i < dirs_or_files.size(); ++i) {
-    auto dir_or_file = dirs_or_files[i].first;
-    std::vector<std::string> children;
-    st = env->GetChildren(dirs_or_files[i].first, &children);
-    if (!st.ok() || children.empty()) {
-      // dir_or_file does not exist or does not contain children
-      // Check its existence first
-      Status s = env->FileExists(dir_or_file);
-      // dir_or_file does not exist
-      if (!s.ok()) {
-        fprintf(stderr, "%s%s: No such file or directory\n",
-                s.ToString().c_str(), dir_or_file);
-        return 1;
-      }
-      // dir_or_file exists and is treated as a "file"
-      // since it has no children
-      // This is ok since later it will be checked
-      // that whether it is a valid sst or not
-      // (A directory "file" is not a valid sst)
-      filenames.emplace_back(dir_or_file);
-      dirs_or_files[i].second = kFile;
-    } else {
-      for (auto& child : children) {
-        filenames.push_back(std::string{dir_or_file} + "/" + child);
-      }
-      dirs_or_files[i].second = kDir;
+  ROCKSDB_NAMESPACE::Status st = env->GetChildren(dir_or_file, &filenames);
+  bool dir = true;
+  if (!st.ok() || filenames.empty()) {
+    // dir_or_file does not exist or does not contain children
+    // Check its existence first
+    Status s = env->FileExists(dir_or_file);
+    // dir_or_file does not exist
+    if (!s.ok()) {
+      fprintf(stderr, "%s%s: No such file or directory\n", s.ToString().c_str(),
+              dir_or_file);
+      return 1;
     }
+    // dir_or_file exists and is treated as a "file"
+    // since it has no children
+    // This is ok since later it will be checked
+    // that whether it is a valid sst or not
+    // (A directory "file" is not a valid sst)
+    filenames.clear();
+    filenames.emplace_back(dir_or_file);
+    dir = false;
   }
 
   uint64_t total_read = 0;
@@ -502,96 +417,48 @@ int SSTDumpTool::Run(int argc, char const* const* argv, Options options) {
       continue;
     }
 
+    if (dir) {
+      filename = std::string(dir_or_file) + "/" + filename;
+    }
+
     if (command == "verify") {
       verify_checksum = true;
     }
 
-    // Update options for when simulating writing a table file
-    {
-      BlockBasedTableOptions bbto;
-      if (options.table_factory->IsInstanceOf(
-              TableFactory::kBlockBasedTableName()) &&
-          options.table_factory->GetOptions<BlockBasedTableOptions>()) {
-        bbto = *options.table_factory->GetOptions<BlockBasedTableOptions>();
-      }
-      bbto.block_size = block_size;
-      bbto.enable_index_compression = enable_index_compression;
-      // Maximize compression features available
-      bbto.format_version = kLatestFormatVersion;
-      options.table_factory = std::make_shared<BlockBasedTableFactory>(bbto);
-    }
-    options.compression_opts.max_dict_bytes = compression_max_dict_bytes;
-    options.compression_opts.zstd_max_train_bytes =
-        compression_zstd_max_train_bytes;
-    options.compression_opts.max_dict_buffer_bytes =
-        compression_max_dict_buffer_bytes;
-    options.compression_opts.use_zstd_dict_trainer =
-        !compression_use_zstd_finalize_dict;
-    options.compression_opts.parallel_threads = compression_parallel_threads;
-
     ROCKSDB_NAMESPACE::SstFileDumper dumper(
         options, filename, Temperature::kUnknown, readahead_size,
         verify_checksum, output_hex, decode_blob_index);
-
     // Not a valid SST
     if (!dumper.getStatus().ok()) {
       fprintf(stderr, "%s: %s\n", filename.c_str(),
               dumper.getStatus().ToString().c_str());
       continue;
-    }
-    auto props_ptr = dumper.GetInitTableProperties();
-    if (props_ptr && (require_property_regex || exclude_property_regex)) {
-      // Call should match with show_properties below
-      auto props_str = props_ptr->ToString("\n  ", ": ");
-      if (require_property_regex &&
-          !std::regex_search(props_str, *require_property_regex)) {
-        fprintf(stderr,
-                "%s: skipping because properties string doesn't match required "
-                "regex\n",
-                filename.c_str());
-        continue;
-      }
-      if (exclude_property_regex &&
-          std::regex_search(props_str, *exclude_property_regex)) {
-        fprintf(
-            stderr,
-            "%s: skipping because properties string matches excluded regex\n",
-            filename.c_str());
-        continue;
-      }
-    }
-    valid_sst_files.push_back(filename);
-    // Print out from and to key information once
-    // where there is at least one valid SST
-    if (valid_sst_files.size() == 1) {
-      // from_key and to_key are only used for "check", "scan", or ""
-      if (command == "check" || command == "scan" || command == "") {
-        fprintf(stdout, "from [%s] to [%s]\n",
-                ROCKSDB_NAMESPACE::Slice(from_key).ToString(true).c_str(),
-                ROCKSDB_NAMESPACE::Slice(to_key).ToString(true).c_str());
+    } else {
+      valid_sst_files.push_back(filename);
+      // Print out from and to key information once
+      // where there is at least one valid SST
+      if (valid_sst_files.size() == 1) {
+        // from_key and to_key are only used for "check", "scan", or ""
+        if (command == "check" || command == "scan" || command == "") {
+          fprintf(stdout, "from [%s] to [%s]\n",
+                  ROCKSDB_NAMESPACE::Slice(from_key).ToString(true).c_str(),
+                  ROCKSDB_NAMESPACE::Slice(to_key).ToString(true).c_str());
+        }
       }
     }
 
     if (command == "recompress") {
-      if (compression_types.empty()) {
-        if (options.compression_manager != nullptr) {
-          for (int c = 0; c < kDisableCompressionOption; ++c) {
-            if (options.compression_manager->SupportsCompressionType(
-                    static_cast<CompressionType>(c))) {
-              compression_types.emplace_back(static_cast<CompressionType>(c));
-            }
-          }
-        } else {
-          compression_types = GetSupportedCompressions();
-        }
-      }
       st = dumper.ShowAllCompressionSizes(
-          compression_types, compress_level_from, compress_level_to);
+          set_block_size ? block_size : 16384,
+          compression_types.empty() ? kCompressions : compression_types,
+          compress_level_from, compress_level_to, compression_max_dict_bytes,
+          compression_zstd_max_train_bytes, compression_max_dict_buffer_bytes,
+          !compression_use_zstd_finalize_dict);
       if (!st.ok()) {
         fprintf(stderr, "Failed to recompress: %s\n", st.ToString().c_str());
         exit(1);
       }
-      continue;
+      return 0;
     }
 
     if (command == "raw") {
@@ -675,35 +542,7 @@ int SSTDumpTool::Run(int argc, char const* const* argv, Options options) {
         fprintf(stderr, "Reader unexpectedly returned null properties\n");
       }
     }
-
-    BlockContents& meta_index_contents = dumper.GetMetaIndexContents();
-    if (list_meta_blocks && meta_index_contents.data.size() > 0) {
-      Block meta_index_block(std::move(meta_index_contents));
-      std::unique_ptr<MetaBlockIter> meta_index_iter;
-      meta_index_iter.reset(meta_index_block.NewMetaIterator());
-      meta_index_iter->SeekToFirst();
-      fprintf(stdout,
-              "Meta Blocks:\n"
-              "------------------------------\n");
-      while (meta_index_iter->status().ok() && meta_index_iter->Valid()) {
-        Slice v = meta_index_iter->value();
-        BlockHandle handle;
-        st = handle.DecodeFrom(&v);
-        if (!st.ok()) {
-          fprintf(stderr, "%s: Could not decode block handle - %s\n",
-                  filename.c_str(), st.ToString().c_str());
-        } else {
-          fprintf(stdout, "  %s: %" PRIu64 " %" PRIu64 "\n",
-                  meta_index_iter->key().ToString().c_str(), handle.offset(),
-                  handle.size());
-        }
-        meta_index_iter->Next();
-      }
-    } else if (list_meta_blocks) {
-      fprintf(stderr, "Could not read the meta index block\n");
-    }
   }
-
   if (show_summary) {
     fprintf(stdout, "total number of files: %" PRIu64 "\n", total_num_files);
     fprintf(stdout, "total number of data blocks: %" PRIu64 "\n",
@@ -719,34 +558,25 @@ int SSTDumpTool::Run(int argc, char const* const* argv, Options options) {
   if (valid_sst_files.empty()) {
     // No valid SST files are found
     // Exit with an error state
-    for (auto& e : dirs_or_files) {
-      if (e.second == kDir) {
-        fprintf(stdout, "------------------------------\n");
-        fprintf(stderr, "No valid SST files found in %s\n", e.first);
-      } else {
-        assert(e.second == kFile);
-        fprintf(stderr, "%s is not a valid SST file\n", e.first);
-      }
+    if (dir) {
+      fprintf(stdout, "------------------------------\n");
+      fprintf(stderr, "No valid SST files found in %s\n", dir_or_file);
+    } else {
+      fprintf(stderr, "%s is not a valid SST file\n", dir_or_file);
     }
     return 1;
   } else {
-    assert(!dirs_or_files.empty());
     if (command == "identify") {
-      if (dirs_or_files.size() > 1 || dirs_or_files[0].second == kDir) {
+      if (dir) {
         fprintf(stdout, "------------------------------\n");
-        std::string single_dir_msg;
-        if (dirs_or_files.size() == 1) {
-          single_dir_msg += " found in ";
-          single_dir_msg += dirs_or_files[0].first;
-        }
-        fprintf(stdout, "List of valid SST files%s:\n", single_dir_msg.c_str());
+        fprintf(stdout, "List of valid SST files found in %s:\n", dir_or_file);
         for (const auto& f : valid_sst_files) {
           fprintf(stdout, "%s\n", f.c_str());
         }
         fprintf(stdout, "Number of valid SST files: %zu\n",
                 valid_sst_files.size());
       } else {
-        fprintf(stdout, "%s is a valid SST file\n", dirs_or_files[0].first);
+        fprintf(stdout, "%s is a valid SST file\n", dir_or_file);
       }
     }
     // At least one valid SST

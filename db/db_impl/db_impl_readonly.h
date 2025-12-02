@@ -155,29 +155,6 @@ class DBImplReadOnly : public DBImpl {
     return Status::NotSupported("Not supported operation in read only mode.");
   }
 
-  using DB::CreateColumnFamily;
-  using DBImpl::CreateColumnFamily;
-  Status CreateColumnFamily(const ColumnFamilyOptions& /*cf_options*/,
-                            const std::string& /*column_family*/,
-                            ColumnFamilyHandle** /*handle*/) override {
-    return Status::NotSupported("Not supported operation in read only mode.");
-  }
-
-  using DB::CreateColumnFamilies;
-  using DBImpl::CreateColumnFamilies;
-  Status CreateColumnFamilies(
-      const ColumnFamilyOptions& /*cf_options*/,
-      const std::vector<std::string>& /*column_family_names*/,
-      std::vector<ColumnFamilyHandle*>* /*handles*/) override {
-    return Status::NotSupported("Not supported operation in read only mode.");
-  }
-
-  Status CreateColumnFamilies(
-      const std::vector<ColumnFamilyDescriptor>& /*column_families*/,
-      std::vector<ColumnFamilyHandle*>* /*handles*/) override {
-    return Status::NotSupported("Not supported operation in read only mode.");
-  }
-
   // FIXME: some missing overrides for more "write" functions
 
  protected:
@@ -194,7 +171,7 @@ class DBImplReadOnly : public DBImpl {
   static Status OpenForReadOnlyWithoutCheck(
       const DBOptions& db_options, const std::string& dbname,
       const std::vector<ColumnFamilyDescriptor>& column_families,
-      std::vector<ColumnFamilyHandle*>* handles, std::unique_ptr<DB>* dbptr,
+      std::vector<ColumnFamilyHandle*>* handles, DB** dbptr,
       bool error_if_wal_file_exists = false);
   friend class DB;
 };

@@ -94,14 +94,11 @@ class SkipListRep : public MemTableRep {
 
   Status GetAndValidate(const LookupKey& k, void* callback_args,
                         bool (*callback_func)(void* arg, const char* entry),
-                        bool allow_data_in_errors, bool detect_key_out_of_order,
-                        const std::function<Status(const char*, bool)>&
-                            key_validation_callback) override {
+                        bool allow_data_in_errors) override {
     SkipListRep::Iterator iter(&skip_list_);
     Slice dummy_slice;
-    Status status = iter.SeekAndValidate(
-        dummy_slice, k.memtable_key().data(), allow_data_in_errors,
-        detect_key_out_of_order, key_validation_callback);
+    Status status = iter.SeekAndValidate(dummy_slice, k.memtable_key().data(),
+                                         allow_data_in_errors);
     for (; iter.Valid() && status.ok() &&
            callback_func(callback_args, iter.key());
          status = iter.NextAndValidate(allow_data_in_errors)) {
@@ -247,18 +244,12 @@ class SkipListRep : public MemTableRep {
     }
 
     Status SeekAndValidate(const Slice& user_key, const char* memtable_key,
-                           bool allow_data_in_errors,
-                           bool detect_key_out_of_order,
-                           const std::function<Status(const char*, bool)>&
-                               key_validation_callback) override {
+                           bool allow_data_in_errors) override {
       if (memtable_key != nullptr) {
-        return iter_.SeekAndValidate(memtable_key, allow_data_in_errors,
-                                     detect_key_out_of_order,
-                                     key_validation_callback);
+        return iter_.SeekAndValidate(memtable_key, allow_data_in_errors);
       } else {
-        return iter_.SeekAndValidate(
-            EncodeKey(&tmp_, user_key), allow_data_in_errors,
-            detect_key_out_of_order, key_validation_callback);
+        return iter_.SeekAndValidate(EncodeKey(&tmp_, user_key),
+                                     allow_data_in_errors);
       }
     }
 

@@ -190,7 +190,7 @@ Status PartitionIndexReader::CacheDependencies(
     // filter blocks
     Status s = table()->MaybeReadBlockAndLoadToCache(
         prefetch_buffer ? prefetch_buffer.get() : tail_prefetch_buffer, ro,
-        handle, rep->decompressor.get(),
+        handle, UncompressionDict::GetEmptyDict(),
         /*for_compaction=*/false, &block.As<Block_kIndex>(),
         /*get_context=*/nullptr, &lookup_context, /*contents=*/nullptr,
         /*async_read=*/false, /*use_block_cache_for_lookup=*/true);

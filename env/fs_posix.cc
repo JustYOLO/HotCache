@@ -243,7 +243,7 @@ class PosixFileSystem : public FileSystem {
       // Use mmap when virtual address-space is plentiful.
       uint64_t size;
       IOOptions opts;
-      s = GetFileSizeOnOpenedFile(fd, fname, &size);
+      s = GetFileSize(fname, opts, &size, nullptr);
       if (s.ok()) {
         void* base = mmap(nullptr, size, PROT_READ, MAP_SHARED, fd, 0);
         if (base != MAP_FAILED) {
@@ -322,17 +322,8 @@ class PosixFileSystem : public FileSystem {
     if (options.use_mmap_writes) {
       MaybeForceDisableMmap(fd);
     }
-    uint64_t initial_file_size = 0;
-    if (reopen) {
-      s = GetFileSizeOnOpenedFile(fd, fname, &initial_file_size);
-      if (!s.ok()) {
-        close(fd);
-        return s;
-      }
-    }
     if (options.use_mmap_writes && !forceMmapOff_) {
-      result->reset(
-          new PosixMmapFile(fname, fd, page_size_, options, initial_file_size));
+      result->reset(new PosixMmapFile(fname, fd, page_size_, options));
     } else if (options.use_direct_writes && !options.use_mmap_writes) {
 #ifdef OS_MACOSX
       if (fcntl(fd, F_NOCACHE, 1) == -1) {
@@ -352,7 +343,7 @@ class PosixFileSystem : public FileSystem {
 #endif
       result->reset(new PosixWritableFile(
           fname, fd, GetLogicalBlockSizeForWriteIfNeeded(options, fname, fd),
-          options, initial_file_size));
+          options));
     } else {
       // disable mmap writes
       EnvOptions no_mmap_writes_options = options;
@@ -361,7 +352,7 @@ class PosixFileSystem : public FileSystem {
           new PosixWritableFile(fname, fd,
                                 GetLogicalBlockSizeForWriteIfNeeded(
                                     no_mmap_writes_options, fname, fd),
-                                no_mmap_writes_options, initial_file_size));
+                                no_mmap_writes_options));
     }
     return s;
   }
@@ -427,8 +418,7 @@ class PosixFileSystem : public FileSystem {
       MaybeForceDisableMmap(fd);
     }
     if (options.use_mmap_writes && !forceMmapOff_) {
-      result->reset(new PosixMmapFile(fname, fd, page_size_, options,
-                                      /*initial_file_size=*/0));
+      result->reset(new PosixMmapFile(fname, fd, page_size_, options));
     } else if (options.use_direct_writes && !options.use_mmap_writes) {
 #ifdef OS_MACOSX
       if (fcntl(fd, F_NOCACHE, 1) == -1) {
@@ -448,16 +438,16 @@ class PosixFileSystem : public FileSystem {
 #endif
       result->reset(new PosixWritableFile(
           fname, fd, GetLogicalBlockSizeForWriteIfNeeded(options, fname, fd),
-          options, /*initial_file_size=*/0));
+          options));
     } else {
       // disable mmap writes
       FileOptions no_mmap_writes_options = options;
       no_mmap_writes_options.use_mmap_writes = false;
-      result->reset(new PosixWritableFile(
-          fname, fd,
-          GetLogicalBlockSizeForWriteIfNeeded(no_mmap_writes_options, fname,
-                                              fd),
-          no_mmap_writes_options, /*initial_file_size=*/0));
+      result->reset(
+          new PosixWritableFile(fname, fd,
+                                GetLogicalBlockSizeForWriteIfNeeded(
+                                    no_mmap_writes_options, fname, fd),
+                                no_mmap_writes_options));
     }
     return s;
   }
@@ -509,7 +499,7 @@ class PosixFileSystem : public FileSystem {
     uint64_t size;
     if (status.ok()) {
       IOOptions opts;
-      status = GetFileSizeOnOpenedFile(fd, fname, &size);
+      status = GetFileSize(fname, opts, &size, nullptr);
     }
     void* base = nullptr;
     if (status.ok()) {
@@ -671,7 +661,7 @@ class PosixFileSystem : public FileSystem {
 
   IOStatus GetFileSize(const std::string& fname, const IOOptions& /*opts*/,
                        uint64_t* size, IODebugContext* /*dbg*/) override {
-    struct stat sbuf {};
+    struct stat sbuf;
     if (stat(fname.c_str(), &sbuf) != 0) {
       *size = 0;
       return IOError("while stat a file for size", fname, errno);
@@ -868,6 +858,7 @@ class PosixFileSystem : public FileSystem {
       IOOptions opts;
       return CreateDirIfMissing(*result, opts, nullptr);
     }
+    return IOStatus::OK();
   }
 
   IOStatus GetFreeSpace(const std::string& fname, const IOOptions& /*opts*/,
@@ -973,22 +964,6 @@ class PosixFileSystem : public FileSystem {
 #endif
  private:
   bool forceMmapOff_ = false;  // do we override Env options?
-
-  // This is a faster API comparing to the public method that uses stat to get
-  // file size. However this API only works on opened file.
-  IOStatus GetFileSizeOnOpenedFile(const int fd, const std::string& name,
-                                   uint64_t* size) {
-    struct stat sb {};
-    *size = 0;
-    // Get file information using fstat
-    if (fstat(fd, &sb) == -1) {
-      return IOError(
-          "while fstat a file for size with fd " + std::to_string(fd), name,
-          errno);
-    }
-    *size = sb.st_size;
-    return IOStatus::OK();
-  }
 
 #ifdef OS_LINUX
   // Get the minimum "linux system limit" (i.e, the largest I/O size that the OS
@@ -1107,10 +1082,8 @@ class PosixFileSystem : public FileSystem {
         struct io_uring_cqe* cqe = nullptr;
         ssize_t ret = io_uring_wait_cqe(iu, &cqe);
         if (ret) {
-          fprintf(stderr, "Poll: io_uring_wait_cqe failed: %ld", (long)ret);
-          if (ret == -EINTR || ret == -EAGAIN) {
-            continue;  // Retry
-          }
+          // abort as it shouldn't be in indeterminate state and there is no
+          // good way currently to handle this error.
           abort();
         }
 
@@ -1153,7 +1126,7 @@ class PosixFileSystem : public FileSystem {
     return IOStatus::OK();
 #else
     (void)io_handles;
-    return IOStatus::NotSupported("Poll not implemented");
+    return IOStatus::NotSupported("Poll");
 #endif
   }
 
@@ -1212,10 +1185,8 @@ class PosixFileSystem : public FileSystem {
         struct io_uring_cqe* cqe = nullptr;
         ssize_t ret = io_uring_wait_cqe(iu, &cqe);
         if (ret) {
-          fprintf(stderr, "AbortIO: io_uring_wait_cqe failed: %ld", (long)ret);
-          if (ret == -EINTR || ret == -EAGAIN) {
-            continue;  // Retry
-          }
+          // abort as it shouldn't be in indeterminate state and there is no
+          // good way currently to handle this error.
           abort();
         }
         assert(cqe != nullptr);
@@ -1272,7 +1243,6 @@ class PosixFileSystem : public FileSystem {
       supported_ops |= (1 << FSSupportedOps::kAsyncIO);
     }
 #endif
-    supported_ops |= (1 << FSSupportedOps::kFSPrefetch);
   }
 
 #if defined(ROCKSDB_IOURING_PRESENT)

@@ -250,8 +250,7 @@ Status BlobFileReader::ReadFromFile(const RandomAccessFileReader* file_reader,
   Status s;
 
   IOOptions io_options;
-  IODebugContext dbg;
-  s = file_reader->PrepareIOOptions(read_options, io_options, &dbg);
+  s = file_reader->PrepareIOOptions(read_options, io_options);
   if (!s.ok()) {
     return s;
   }
@@ -260,13 +259,13 @@ Status BlobFileReader::ReadFromFile(const RandomAccessFileReader* file_reader,
     constexpr char* scratch = nullptr;
 
     s = file_reader->Read(io_options, read_offset, read_size, slice, scratch,
-                          aligned_buf, &dbg);
+                          aligned_buf);
   } else {
     buf->reset(new char[read_size]);
     constexpr AlignedBuf* aligned_scratch = nullptr;
 
     s = file_reader->Read(io_options, read_offset, read_size, slice, buf->get(),
-                          aligned_scratch, &dbg);
+                          aligned_scratch);
   }
 
   if (!s.ok()) {
@@ -335,8 +334,7 @@ Status BlobFileReader::GetBlob(
     constexpr bool for_compaction = true;
 
     IOOptions io_options;
-    IODebugContext dbg;
-    s = file_reader_->PrepareIOOptions(read_options, io_options, &dbg);
+    s = file_reader_->PrepareIOOptions(read_options, io_options);
     if (!s.ok()) {
       return s;
     }
@@ -465,11 +463,10 @@ void BlobFileReader::MultiGetBlob(
   PERF_COUNTER_ADD(blob_read_count, num_blobs);
   PERF_COUNTER_ADD(blob_read_byte, total_len);
   IOOptions opts;
-  IODebugContext dbg;
-  s = file_reader_->PrepareIOOptions(read_options, opts, &dbg);
+  s = file_reader_->PrepareIOOptions(read_options, opts);
   if (s.ok()) {
     s = file_reader_->MultiRead(opts, read_reqs.data(), read_reqs.size(),
-                                direct_io ? &aligned_buf : nullptr, &dbg);
+                                direct_io ? &aligned_buf : nullptr);
   }
   if (!s.ok()) {
     for (auto& req : read_reqs) {
@@ -605,9 +602,9 @@ Status BlobFileReader::UncompressBlobIfNeeded(
   {
     PERF_TIMER_GUARD(blob_decompress_time);
     StopWatch stop_watch(clock, statistics, BLOB_DB_DECOMPRESSION_MICROS);
-    output = OLD_UncompressData(info, value_slice.data(), value_slice.size(),
-                                &uncompressed_size, compression_format_version,
-                                allocator);
+    output = UncompressData(info, value_slice.data(), value_slice.size(),
+                            &uncompressed_size, compression_format_version,
+                            allocator);
   }
 
   TEST_SYNC_POINT_CALLBACK(

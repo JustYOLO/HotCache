@@ -134,7 +134,6 @@ struct BufferInfo {
 enum class FilePrefetchBufferUsage {
   kTableOpenPrefetchTail,
   kUserScanPrefetch,
-  kCompactionPrefetch,
   kUnknown,
 };
 
@@ -575,9 +574,6 @@ class FilePrefetchBuffer {
                            size_t& read_len, uint64_t& aligned_useful_len);
 
   void UpdateStats(bool found_in_buffer, size_t length_found) {
-    if (usage_ != FilePrefetchBufferUsage::kUserScanPrefetch) {
-      return;
-    }
     if (found_in_buffer) {
       RecordTick(stats_, PREFETCH_HITS);
     }

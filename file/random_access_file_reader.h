@@ -164,8 +164,7 @@ class RandomAccessFileReader {
   // the internally allocated buffer on return, and the result refers to a
   // region in aligned_buf.
   IOStatus Read(const IOOptions& opts, uint64_t offset, size_t n, Slice* result,
-                char* scratch, AlignedBuf* aligned_buf,
-                IODebugContext* dbg = nullptr) const;
+                char* scratch, AlignedBuf* aligned_buf) const;
 
   // REQUIRES:
   // num_reqs > 0, reqs do not overlap, and offsets in reqs are increasing.
@@ -173,12 +172,10 @@ class RandomAccessFileReader {
   // In direct IO mode, aligned_buf stores the aligned buffer allocated inside
   // MultiRead, the result Slices in reqs refer to aligned_buf.
   IOStatus MultiRead(const IOOptions& opts, FSReadRequest* reqs,
-                     size_t num_reqs, AlignedBuf* aligned_buf,
-                     IODebugContext* dbg = nullptr) const;
+                     size_t num_reqs, AlignedBuf* aligned_buf) const;
 
-  IOStatus Prefetch(const IOOptions& opts, uint64_t offset, size_t n,
-                    IODebugContext* dbg = nullptr) const {
-    return file_->Prefetch(offset, n, opts, dbg);
+  IOStatus Prefetch(const IOOptions& opts, uint64_t offset, size_t n) const {
+    return file_->Prefetch(offset, n, opts, nullptr);
   }
 
   FSRandomAccessFile* file() { return file_.get(); }
@@ -187,13 +184,12 @@ class RandomAccessFileReader {
 
   bool use_direct_io() const { return file_->use_direct_io(); }
 
-  IOStatus PrepareIOOptions(const ReadOptions& ro, IOOptions& opts,
-                            IODebugContext* dbg = nullptr) const;
+  IOStatus PrepareIOOptions(const ReadOptions& ro, IOOptions& opts) const;
 
   IOStatus ReadAsync(FSReadRequest& req, const IOOptions& opts,
                      std::function<void(FSReadRequest&, void*)> cb,
                      void* cb_arg, void** io_handle, IOHandleDeleter* del_fn,
-                     AlignedBuf* aligned_buf, IODebugContext* dbg = nullptr);
+                     AlignedBuf* aligned_buf);
 
   void ReadAsyncCallback(FSReadRequest& req, void* cb_arg);
 };

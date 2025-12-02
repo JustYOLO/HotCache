@@ -84,7 +84,6 @@ void DBImpl::TEST_GetFilesMetaData(
 }
 
 uint64_t DBImpl::TEST_Current_Manifest_FileNo() {
-  InstrumentedMutexLock l(&mutex_);
   return versions_->manifest_file_number();
 }
 
@@ -104,8 +103,8 @@ Status DBImpl::TEST_CompactRange(int level, const Slice* begin,
     cfd = cfh->cfd();
   }
   int output_level =
-      (cfd->ioptions().compaction_style == kCompactionStyleUniversal ||
-       cfd->ioptions().compaction_style == kCompactionStyleFIFO)
+      (cfd->ioptions()->compaction_style == kCompactionStyleUniversal ||
+       cfd->ioptions()->compaction_style == kCompactionStyleFIFO)
           ? level
           : level + 1;
   return RunManualCompaction(
@@ -225,13 +224,13 @@ void DBImpl::TEST_EndWrite(void* w) {
 }
 
 size_t DBImpl::TEST_LogsToFreeSize() {
-  InstrumentedMutexLock l(&wal_write_mutex_);
-  return wals_to_free_.size();
+  InstrumentedMutexLock l(&log_write_mutex_);
+  return logs_to_free_.size();
 }
 
 uint64_t DBImpl::TEST_LogfileNumber() {
   InstrumentedMutexLock l(&mutex_);
-  return cur_wal_number_;
+  return logfile_number_;
 }
 
 void DBImpl::TEST_GetAllBlockCaches(
@@ -240,7 +239,7 @@ void DBImpl::TEST_GetAllBlockCaches(
   for (auto cfd : *versions_->GetColumnFamilySet()) {
     if (const auto bbto =
             cfd->GetCurrentMutableCFOptions()
-                .table_factory->GetOptions<BlockBasedTableOptions>()) {
+                ->table_factory->GetOptions<BlockBasedTableOptions>()) {
       cache_set->insert(bbto->block_cache.get());
     }
   }
@@ -268,7 +267,7 @@ Status DBImpl::TEST_GetLatestMutableCFOptions(
   InstrumentedMutexLock l(&mutex_);
 
   auto cfh = static_cast_with_check<ColumnFamilyHandleImpl>(column_family);
-  *mutable_cf_options = cfh->cfd()->GetLatestMutableCFOptions();
+  *mutable_cf_options = *cfh->cfd()->GetLatestMutableCFOptions();
   return Status::OK();
 }
 
@@ -380,13 +379,10 @@ void DBImpl::TEST_VerifyNoObsoleteFilesCached(
     uint64_t file_number;
     GetUnaligned(reinterpret_cast<const uint64_t*>(key.data()), &file_number);
     // Assert file is in live/quarantined set
-    bool cached_file_is_live_or_quar =
-        live_and_quar_files.find(file_number) != live_and_quar_files.end();
-    if (!cached_file_is_live_or_quar) {
-      // Fail with useful info
+    if (live_and_quar_files.find(file_number) == live_and_quar_files.end()) {
       std::cerr << "File " << file_number << " is not live nor quarantined"
                 << std::endl;
-      assert(cached_file_is_live_or_quar);
+      assert(false);
     }
   };
   table_cache_->ApplyToAllEntries(fn, {});

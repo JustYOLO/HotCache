@@ -10,7 +10,6 @@
 
 #include "db/dbformat.h"
 #include "file/readahead_file_info.h"
-#include "rocksdb/advanced_iterator.h"
 #include "rocksdb/comparator.h"
 #include "rocksdb/iterator.h"
 #include "rocksdb/status.h"
@@ -19,6 +18,19 @@
 namespace ROCKSDB_NAMESPACE {
 
 class PinnedIteratorsManager;
+
+enum class IterBoundCheck : char {
+  kUnknown = 0,
+  kOutOfBound,
+  kInbound,
+};
+
+struct IterateResult {
+  Slice key;
+  IterBoundCheck bound_check_result = IterBoundCheck::kUnknown;
+  // If false, PrepareValue() needs to be called before value().
+  bool value_prepared = true;
+};
 
 template <class TValue>
 class InternalIteratorBase : public Cleanable {
@@ -199,8 +211,6 @@ class InternalIteratorBase : public Cleanable {
   // it cheap to check if the current key is a sentinel key. This should only be
   // used by MergingIterator and LevelIterator for now.
   virtual bool IsDeleteRangeSentinelKey() const { return false; }
-
-  virtual void Prepare(const MultiScanArgs* /*scan_opts*/) {}
 
  protected:
   void SeekForPrevImpl(const Slice& target, const CompareInterface* cmp) {

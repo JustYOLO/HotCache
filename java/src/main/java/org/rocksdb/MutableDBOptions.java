@@ -76,9 +76,7 @@ public class MutableDBOptions extends AbstractMutableOptions {
     bytes_per_sync(ValueType.LONG),
     wal_bytes_per_sync(ValueType.LONG),
     strict_bytes_per_sync(ValueType.BOOLEAN),
-    compaction_readahead_size(ValueType.LONG),
-
-    daily_offpeak_time_utc(ValueType.STRING);
+    compaction_readahead_size(ValueType.LONG);
 
     private final ValueType valueType;
     DBOption(final ValueType valueType) {
@@ -289,16 +287,6 @@ public class MutableDBOptions extends AbstractMutableOptions {
     @Override
     public long compactionReadaheadSize() {
       return getLong(DBOption.compaction_readahead_size);
-    }
-
-    @Override
-    public MutableDBOptionsBuilder setDailyOffpeakTimeUTC(final String offpeakTimeUTC) {
-      return setString(DBOption.daily_offpeak_time_utc, offpeakTimeUTC);
-    }
-
-    @Override
-    public String dailyOffpeakTimeUTC() {
-      return getString(DBOption.daily_offpeak_time_utc);
     }
   }
 }

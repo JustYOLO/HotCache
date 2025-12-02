@@ -28,10 +28,6 @@
 
 #include <future>
 
-#include "test_util/testharness.h"
-
-namespace ROCKSDB_NAMESPACE {
-
 namespace Timing {
 
 using Clock = std::chrono::high_resolution_clock;
@@ -43,9 +39,7 @@ double now() {
 
 }  // namespace Timing
 
-class TimerQueueTest : public testing::Test {};
-
-TEST_F(TimerQueueTest, BasicFunctionality) {
+int main() {
   TimerQueue q;
 
   double tnow = Timing::now();
@@ -74,14 +68,6 @@ TEST_F(TimerQueueTest, BasicFunctionality) {
   // assert(ret == 1);
   // q.cancelAll();
 
-  // Test passes if we can create and add timers without crashing
-  ASSERT_TRUE(true);
+  return 0;
 }
-
-}  // namespace ROCKSDB_NAMESPACE
-
-int main(int argc, char** argv) {
-  ROCKSDB_NAMESPACE::port::InstallStackTraceHandler();
-  ::testing::InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
-}
+//////////////////////////////////////////

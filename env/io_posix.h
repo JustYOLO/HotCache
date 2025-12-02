@@ -352,8 +352,6 @@ class PosixRandomAccessFile : public FSRandomAccessFile {
                              void* cb_arg, void** io_handle,
                              IOHandleDeleter* del_fn,
                              IODebugContext* dbg) override;
-
-  virtual IOStatus GetFileSize(uint64_t* result) override;
 };
 
 class PosixWritableFile : public FSWritableFile {
@@ -376,8 +374,7 @@ class PosixWritableFile : public FSWritableFile {
  public:
   explicit PosixWritableFile(const std::string& fname, int fd,
                              size_t logical_block_size,
-                             const EnvOptions& options,
-                             uint64_t initial_file_size);
+                             const EnvOptions& options);
   virtual ~PosixWritableFile();
 
   // Need to implement this so the file is truncated correctly
@@ -439,7 +436,6 @@ class PosixMmapReadableFile : public FSRandomAccessFile {
                 char* scratch, IODebugContext* dbg) const override;
   void Hint(AccessPattern pattern) override;
   IOStatus InvalidateCache(size_t offset, size_t length) override;
-  virtual IOStatus GetFileSize(uint64_t* result) override;
 };
 
 class PosixMmapFile : public FSWritableFile {
@@ -473,7 +469,7 @@ class PosixMmapFile : public FSWritableFile {
 
  public:
   PosixMmapFile(const std::string& fname, int fd, size_t page_size,
-                const EnvOptions& options, uint64_t initial_file_size);
+                const EnvOptions& options);
   ~PosixMmapFile();
 
   // Means Close() will properly take care of truncate

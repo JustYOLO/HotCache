@@ -19,7 +19,6 @@
 #include "table/format.h"
 #include "util/coding.h"
 #include "util/string_util.h"
-#include "utilities/blob_db/blob_db_impl.h"
 
 namespace ROCKSDB_NAMESPACE::blob_db {
 
@@ -211,9 +210,9 @@ Status BlobDumpTool::DumpRecord(DisplayType show_key, DisplayType show_blob,
     UncompressionContext context(compression);
     UncompressionInfo info(context, UncompressionDict::GetEmptyDict(),
                            compression);
-    s = DecompressBlockData(
-        slice.data() + key_size, static_cast<size_t>(value_size), compression,
-        BlobDecompressor(), &contents, ImmutableOptions(Options()));
+    s = UncompressBlockData(
+        info, slice.data() + key_size, static_cast<size_t>(value_size),
+        &contents, 2 /*compress_format_version*/, ImmutableOptions(Options()));
     if (!s.ok()) {
       return s;
     }

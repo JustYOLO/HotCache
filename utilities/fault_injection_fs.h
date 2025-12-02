@@ -106,8 +106,8 @@ class TestFSWritableFile : public FSWritableFile {
   const bool unsync_data_loss_;
 };
 
-// A wrapper around FSRandomRWFile* file
-// is read from/write to or sync'ed.
+// A wrapper around WritableFileWriter* file
+// is written to or sync'ed.
 class TestFSRandomRWFile : public FSRandomRWFile {
  public:
   explicit TestFSRandomRWFile(const std::string& fname,
@@ -128,9 +128,6 @@ class TestFSRandomRWFile : public FSRandomRWFile {
   bool use_direct_io() const override { return target_->use_direct_io(); }
 
  private:
-  // keep a copy of file name, so we can untrack it in File system, when it is
-  // closed
-  std::string fname_;
   std::unique_ptr<FSRandomRWFile> target_;
   bool file_opened_;
   FaultInjectionTestFS* fs_;
@@ -158,12 +155,9 @@ class TestFSRandomAccessFile : public FSRandomAccessFile {
 
   size_t GetUniqueId(char* id, size_t max_size) const override;
 
-  IOStatus GetFileSize(uint64_t* file_size) override;
-
  private:
   std::unique_ptr<FSRandomAccessFile> target_;
   FaultInjectionTestFS* fs_;
-  const bool is_sst_;
 };
 
 class TestFSSequentialFile : public FSSequentialFileOwnerWrapper {
@@ -223,31 +217,21 @@ class FaultInjectionTestFS : public FileSystemWrapper {
         injected_thread_local_metadata_write_error_(
             DeleteThreadLocalErrorContext),
         ingest_data_corruption_before_write_(false),
-        checksum_handoff_func_type_(kCRC32c) {}
+        checksum_handoff_func_type_(kCRC32c),
+        fail_get_file_unique_id_(false) {}
   virtual ~FaultInjectionTestFS() override { fs_error_.PermitUncheckedError(); }
 
   static const char* kClassName() { return "FaultInjectionTestFS"; }
   const char* Name() const override { return kClassName(); }
 
-  static bool IsInjectedError(const Status& s,
-                              const std::string& specific_error_marker = "") {
-    if (s.ok()) {
-      return false;
-    }
-    const char* state = s.getState();
-    if (state == nullptr) {
-      return false;
-    }
-    bool is_injected_error = std::strstr(state, kInjected.c_str()) != nullptr;
-    bool is_specific_error =
-        specific_error_marker.empty() ||
-        std::strstr(state, specific_error_marker.c_str()) != nullptr;
-
-    return is_injected_error && is_specific_error;
+  static bool IsInjectedError(const Status& s) {
+    assert(!s.ok());
+    return std::strstr(s.getState(), kInjected.c_str());
   }
 
   static bool IsFailedToWriteToWALError(const Status& s) {
-    return IsInjectedError(s, kFailedToWriteToWAL);
+    assert(!s.ok());
+    return std::strstr(s.getState(), kFailedToWriteToWAL.c_str());
   }
 
   IOStatus NewDirectory(const std::string& name, const IOOptions& options,
@@ -354,8 +338,6 @@ class FaultInjectionTestFS : public FileSystemWrapper {
 
   void WritableFileAppended(const FSFileState& state);
 
-  void RandomRWFileClosed(const std::string& fname);
-
   IOStatus DropUnsyncedFileData();
 
   IOStatus DropRandomUnsyncedFileData(Random* rnd);
@@ -442,11 +424,10 @@ class FaultInjectionTestFS : public FileSystemWrapper {
     allow_link_open_file_ = allow_link_open_file;
   }
 
-  bool ShouldIOActivitiesExcludedFromFaultInjection(
-      Env::IOActivity io_activity) {
+  bool ShouldIOActivtiesExcludedFromFaultInjection(Env::IOActivity io_activty) {
     MutexLock l(&mutex_);
-    return io_activities_excluded_from_fault_injection.find(io_activity) !=
-           io_activities_excluded_from_fault_injection.end();
+    return io_activties_excluded_from_fault_injection.find(io_activty) !=
+           io_activties_excluded_from_fault_injection.end();
   }
 
   void AssertNoOpenFile() { assert(open_managed_files_.empty()); }
@@ -495,26 +476,6 @@ class FaultInjectionTestFS : public FileSystemWrapper {
     return fail_get_file_unique_id_;
   }
 
-  void SetFailRandomAccessGetFileSizeSst(bool flag) {
-    MutexLock l(&mutex_);
-    fail_random_access_get_file_size_sst_ = flag;
-  }
-
-  bool ShouldFailRandomAccessGetFileSizeSst() {
-    MutexLock l(&mutex_);
-    return fail_random_access_get_file_size_sst_;
-  }
-
-  void SetFailFilesystemGetFileSizeSst(bool flag) {
-    MutexLock l(&mutex_);
-    fail_fs_get_file_size_sst_ = flag;
-  }
-
-  bool ShouldFailFilesystemGetFileSizeSst() {
-    MutexLock l(&mutex_);
-    return fail_fs_get_file_size_sst_;
-  }
-
   // Specify what the operation, so we can inject the right type of error
   enum ErrorOperation : char {
     kRead = 0,
@@ -559,10 +520,10 @@ class FaultInjectionTestFS : public FileSystemWrapper {
     return count;
   }
 
-  void SetIOActivitiesExcludedFromFaultInjection(
-      const std::set<Env::IOActivity>& io_activities) {
+  void SetIOActivtiesExcludedFromFaultInjection(
+      const std::set<Env::IOActivity>& io_activties) {
     MutexLock l(&mutex_);
-    io_activities_excluded_from_fault_injection = io_activities;
+    io_activties_excluded_from_fault_injection = io_activties;
   }
 
   void SetFileTypesExcludedFromWriteFaultInjection(
@@ -666,16 +627,14 @@ class FaultInjectionTestFS : public FileSystemWrapper {
   };
 
   std::set<FileType> file_types_excluded_from_write_fault_injection_;
-  std::set<Env::IOActivity> io_activities_excluded_from_fault_injection;
+  std::set<Env::IOActivity> io_activties_excluded_from_fault_injection;
   ThreadLocalPtr injected_thread_local_read_error_;
   ThreadLocalPtr injected_thread_local_write_error_;
   ThreadLocalPtr injected_thread_local_metadata_read_error_;
   ThreadLocalPtr injected_thread_local_metadata_write_error_;
   bool ingest_data_corruption_before_write_;
   ChecksumType checksum_handoff_func_type_;
-  bool fail_get_file_unique_id_ = false;
-  bool fail_random_access_get_file_size_sst_ = false;
-  bool fail_fs_get_file_size_sst_ = false;
+  bool fail_get_file_unique_id_;
 
   // Inject an error. For a READ operation, a status of IOError(), a
   // corruption in the contents of scratch, or truncation of slice

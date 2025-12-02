@@ -117,43 +117,21 @@ Status ListColumnFamiliesHandler::ApplyVersionEdit(
   return s;
 }
 
-Status FileChecksumRetriever::FetchFileChecksumList(
-    FileChecksumList& file_checksum_list) {
-  Status s = Status::OK();
-  for (const auto& [cf, file_checksums] : cf_file_checksums_) {
-    [[maybe_unused]] const auto& _ = cf;
-    for (const auto& [file_number, info] : file_checksums) {
-      if (!(s = file_checksum_list.InsertOneFileChecksum(
-                file_number, info.first, info.second))
-               .ok()) {
-        break;
-      }
-    }
-  }
-  return s;
-}
-
 Status FileChecksumRetriever::ApplyVersionEdit(VersionEdit& edit,
                                                ColumnFamilyData** /*unused*/) {
-  uint32_t column_family_id = edit.GetColumnFamily();
-  if (edit.IsColumnFamilyDrop()) {
-    cf_file_checksums_.erase(column_family_id);
-  }
   for (const auto& deleted_file : edit.GetDeletedFiles()) {
-    if (cf_file_checksums_.find(column_family_id) == cf_file_checksums_.end()) {
-      return Status::NotFound();
+    Status s = file_checksum_list_.RemoveOneFileChecksum(deleted_file.second);
+    if (!s.ok()) {
+      return s;
     }
-    if (cf_file_checksums_[column_family_id].find(deleted_file.second) ==
-        cf_file_checksums_[column_family_id].end()) {
-      return Status::NotFound();
-    }
-    cf_file_checksums_[column_family_id].erase(deleted_file.second);
   }
   for (const auto& new_file : edit.GetNewFiles()) {
-    cf_file_checksums_[column_family_id].emplace(
-        new_file.second.fd.GetNumber(),
-        std::make_pair(new_file.second.file_checksum,
-                       new_file.second.file_checksum_func_name));
+    Status s = file_checksum_list_.InsertOneFileChecksum(
+        new_file.second.fd.GetNumber(), new_file.second.file_checksum,
+        new_file.second.file_checksum_func_name);
+    if (!s.ok()) {
+      return s;
+    }
   }
   for (const auto& new_blob_file : edit.GetBlobFileAdditions()) {
     std::string checksum_value = new_blob_file.GetChecksumValue();
@@ -163,9 +141,11 @@ Status FileChecksumRetriever::ApplyVersionEdit(VersionEdit& edit,
       checksum_value = kUnknownFileChecksum;
       checksum_method = kUnknownFileChecksumFuncName;
     }
-    cf_file_checksums_[column_family_id].emplace(
-        new_blob_file.GetBlobFileNumber(),
-        std::make_pair(checksum_value, checksum_method));
+    Status s = file_checksum_list_.InsertOneFileChecksum(
+        new_blob_file.GetBlobFileNumber(), checksum_value, checksum_method);
+    if (!s.ok()) {
+      return s;
+    }
   }
   return Status::OK();
 }
@@ -428,7 +408,7 @@ void VersionEditHandler::CheckIterationResult(const log::Reader& reader,
       if (cfd->IsDropped()) {
         continue;
       }
-      if (version_set_->unchanging()) {
+      if (read_only_) {
         cfd->table_cache()->SetTablesAreImmortal();
       }
       *s = LoadTables(cfd, /*prefetch_index_and_filter_in_cache=*/false,
@@ -491,8 +471,8 @@ void VersionEditHandler::CheckIterationResult(const log::Reader& reader,
 ColumnFamilyData* VersionEditHandler::CreateCfAndInit(
     const ColumnFamilyOptions& cf_options, const VersionEdit& edit) {
   uint32_t cf_id = edit.GetColumnFamily();
-  ColumnFamilyData* cfd = version_set_->CreateColumnFamily(
-      cf_options, read_options_, &edit, read_only_);
+  ColumnFamilyData* cfd =
+      version_set_->CreateColumnFamily(cf_options, read_options_, &edit);
   assert(cfd != nullptr);
   cfd->set_initialized();
   assert(builders_.find(cf_id) == builders_.end());
@@ -526,14 +506,14 @@ Status VersionEditHandler::MaybeCreateVersionBeforeApplyEdit(
   auto* builder = builder_iter->second->version_builder();
   if (force_create_version) {
     auto* v = new Version(cfd, version_set_, version_set_->file_options_,
-                          cfd->GetLatestMutableCFOptions(), io_tracer_,
+                          *cfd->GetLatestMutableCFOptions(), io_tracer_,
                           version_set_->current_version_number_++,
                           epoch_number_requirement_);
     s = builder->SaveTo(v->storage_info());
     if (s.ok()) {
       // Install new version
       v->PrepareAppend(
-          read_options_,
+          *cfd->GetLatestMutableCFOptions(), read_options_,
           !(version_set_->db_options_->skip_stats_update_on_db_open));
       version_set_->AppendVersion(cfd, v);
     } else {
@@ -561,12 +541,12 @@ Status VersionEditHandler::LoadTables(ColumnFamilyData* cfd,
   assert(builder_iter->second != nullptr);
   VersionBuilder* builder = builder_iter->second->version_builder();
   assert(builder);
-  const auto& moptions = cfd->GetLatestMutableCFOptions();
+  const MutableCFOptions* moptions = cfd->GetLatestMutableCFOptions();
   Status s = builder->LoadTableHandlers(
       cfd->internal_stats(),
       version_set_->db_options_->max_file_opening_threads,
-      prefetch_index_and_filter_in_cache, is_initial_load, moptions,
-      MaxFileSizeForL0MetaPin(moptions), read_options_);
+      prefetch_index_and_filter_in_cache, is_initial_load, *moptions,
+      MaxFileSizeForL0MetaPin(*moptions), read_options_);
   if ((s.IsPathNotFound() || s.IsCorruption()) && no_error_if_files_missing_) {
     s = Status::OK();
   }
@@ -602,7 +582,7 @@ Status VersionEditHandler::ExtractInfoFromVersionEdit(ColumnFamilyData* cfd,
       // it's not recorded and it should have default value true.
       s = ValidateUserDefinedTimestampsOptions(
           cfd->user_comparator(), edit.GetComparatorName(),
-          cfd->ioptions().persist_user_defined_timestamps,
+          cfd->ioptions()->persist_user_defined_timestamps,
           edit.GetPersistUserDefinedTimestamps(), &mark_sst_files_has_no_udt);
       if (!s.ok() && cf_to_cmp_names_) {
         cf_to_cmp_names_->emplace(cfd->GetID(), edit.GetComparatorName());
@@ -881,14 +861,15 @@ Status VersionEditHandlerPointInTime::MaybeCreateVersionBeforeApplyEdit(
   if (s.ok() && !missing_info && !in_atomic_group_ &&
       ((!valid_pit_after_edit && valid_pit_before_edit) ||
        (valid_pit_after_edit && force_create_version))) {
-    const auto& mopts = cfd->GetLatestMutableCFOptions();
-    auto* version = new Version(
-        cfd, version_set_, version_set_->file_options_, mopts, io_tracer_,
-        version_set_->current_version_number_++, epoch_number_requirement_);
+    const MutableCFOptions* cf_opts_ptr = cfd->GetLatestMutableCFOptions();
+    auto* version = new Version(cfd, version_set_, version_set_->file_options_,
+                                *cf_opts_ptr, io_tracer_,
+                                version_set_->current_version_number_++,
+                                epoch_number_requirement_);
     s = builder->LoadSavePointTableHandlers(
         cfd->internal_stats(),
-        version_set_->db_options_->max_file_opening_threads, false, true, mopts,
-        MaxFileSizeForL0MetaPin(mopts), read_options_);
+        version_set_->db_options_->max_file_opening_threads, false, true,
+        *cf_opts_ptr, MaxFileSizeForL0MetaPin(*cf_opts_ptr), read_options_);
     if (!s.ok()) {
       delete version;
       if (s.IsCorruption()) {
@@ -905,7 +886,7 @@ Status VersionEditHandlerPointInTime::MaybeCreateVersionBeforeApplyEdit(
         }
       } else {
         version->PrepareAppend(
-            read_options_,
+            *cfd->GetLatestMutableCFOptions(), read_options_,
             !version_set_->db_options_->skip_stats_update_on_db_open);
         auto v_iter = versions_.find(cfd->GetID());
         if (v_iter != versions_.end()) {
@@ -1005,7 +986,7 @@ void VersionEditHandlerPointInTime::AtomicUpdateVersionsApply() {
     Version* version = cfid_and_version.second;
     assert(version != nullptr);
     version->PrepareAppend(
-        read_options_,
+        *version->cfd()->GetLatestMutableCFOptions(), read_options_,
         !version_set_->db_options_->skip_stats_update_on_db_open);
     auto versions_iter = versions_.find(cfid);
     if (versions_iter != versions_.end()) {
@@ -1155,15 +1136,6 @@ void DumpManifestHandler::CheckIterationResult(const log::Reader& reader,
     // Print out DebugStrings. Can include non-terminating null characters.
     fwrite(cfd->current()->DebugString(hex_).data(), sizeof(char),
            cfd->current()->DebugString(hex_).size(), stdout);
-
-    fprintf(stdout,
-            "By default, manifest file dump prints LSM trees as if %d levels "
-            "were configured, "
-            "which is not necessarily true for the column family (CF) this "
-            "manifest is associated with. "
-            "Please consult other DB files, such as the OPTIONS file, to "
-            "confirm.\n",
-            cfd->ioptions().num_levels);
   }
   fprintf(stdout,
           "next_file_number %" PRIu64 " last_sequence %" PRIu64

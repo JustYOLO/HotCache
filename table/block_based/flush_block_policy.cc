@@ -19,7 +19,7 @@
 namespace ROCKSDB_NAMESPACE {
 
 // Flush block by size
-class FlushBlockBySizePolicy : public RetargetableFlushBlockPolicy {
+class FlushBlockBySizePolicy : public FlushBlockPolicy {
  public:
   // @params block_size:           Approximate size of user data packed per
   //                               block.
@@ -28,19 +28,19 @@ class FlushBlockBySizePolicy : public RetargetableFlushBlockPolicy {
   FlushBlockBySizePolicy(const uint64_t block_size,
                          const uint64_t block_size_deviation, const bool align,
                          const BlockBuilder& data_block_builder)
-      : RetargetableFlushBlockPolicy(data_block_builder),
-        block_size_(block_size),
+      : block_size_(block_size),
         block_size_deviation_limit_(
             ((block_size * (100 - block_size_deviation)) + 99) / 100),
-        align_(align) {}
+        align_(align),
+        data_block_builder_(data_block_builder) {}
 
   bool Update(const Slice& key, const Slice& value) override {
     // it makes no sense to flush when the data block is empty
-    if (data_block_builder_->empty()) {
+    if (data_block_builder_.empty()) {
       return false;
     }
 
-    auto curr_size = data_block_builder_->CurrentSizeEstimate();
+    auto curr_size = data_block_builder_.CurrentSizeEstimate();
 
     // Do flush if one of the below two conditions is true:
     // 1) if the current estimated size already exceeds the block size,
@@ -56,9 +56,9 @@ class FlushBlockBySizePolicy : public RetargetableFlushBlockPolicy {
       return false;
     }
 
-    const auto curr_size = data_block_builder_->CurrentSizeEstimate();
+    const auto curr_size = data_block_builder_.CurrentSizeEstimate();
     auto estimated_size_after =
-        data_block_builder_->EstimateSizeAfterKV(key, value);
+        data_block_builder_.EstimateSizeAfterKV(key, value);
 
     if (align_) {
       estimated_size_after += BlockBasedTable::kBlockTrailerSize;
@@ -72,6 +72,7 @@ class FlushBlockBySizePolicy : public RetargetableFlushBlockPolicy {
   const uint64_t block_size_;
   const uint64_t block_size_deviation_limit_;
   const bool align_;
+  const BlockBuilder& data_block_builder_;
 };
 
 FlushBlockPolicy* FlushBlockBySizePolicyFactory::NewFlushBlockPolicy(
@@ -82,18 +83,10 @@ FlushBlockPolicy* FlushBlockBySizePolicyFactory::NewFlushBlockPolicy(
       table_options.block_align, data_block_builder);
 }
 
-std::unique_ptr<RetargetableFlushBlockPolicy> NewFlushBlockBySizePolicy(
-    const uint64_t size, const int deviation,
-    const BlockBuilder& data_block_builder) {
-  return std::make_unique<FlushBlockBySizePolicy>(size, deviation, false,
-                                                  data_block_builder);
-}
-
 FlushBlockPolicy* FlushBlockBySizePolicyFactory::NewFlushBlockPolicy(
     const uint64_t size, const int deviation,
     const BlockBuilder& data_block_builder) {
-  return NewFlushBlockBySizePolicy(size, deviation, data_block_builder)
-      .release();
+  return new FlushBlockBySizePolicy(size, deviation, false, data_block_builder);
 }
 
 static int RegisterFlushBlockPolicyFactories(ObjectLibrary& library,

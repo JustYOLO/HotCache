@@ -33,12 +33,41 @@ ConfigOptions GetStrictConfigOptions() {
 class TieredCompactionTest : public DBTestBase {
  public:
   TieredCompactionTest()
-      : DBTestBase("tiered_compaction_test", /*env_do_fsync=*/true) {}
+      : DBTestBase("tiered_compaction_test", /*env_do_fsync=*/true),
+        kBasicCompStats(CompactionReason::kUniversalSizeAmplification, 1),
+        kBasicPerKeyPlacementCompStats(
+            CompactionReason::kUniversalSizeAmplification, 1),
+        kBasicFlushStats(CompactionReason::kFlush, 1) {
+    kBasicCompStats.micros = kHasValue;
+    kBasicCompStats.cpu_micros = kHasValue;
+    kBasicCompStats.bytes_read_non_output_levels = kHasValue;
+    kBasicCompStats.num_input_files_in_non_output_levels = kHasValue;
+    kBasicCompStats.num_input_records = kHasValue;
+    kBasicCompStats.num_dropped_records = kHasValue;
+
+    kBasicPerLevelStats.num_output_records = kHasValue;
+    kBasicPerLevelStats.bytes_written = kHasValue;
+    kBasicPerLevelStats.num_output_files = kHasValue;
+
+    kBasicPerKeyPlacementCompStats.micros = kHasValue;
+    kBasicPerKeyPlacementCompStats.cpu_micros = kHasValue;
+    kBasicPerKeyPlacementCompStats.Add(kBasicPerLevelStats);
+
+    kBasicFlushStats.micros = kHasValue;
+    kBasicFlushStats.cpu_micros = kHasValue;
+    kBasicFlushStats.bytes_written = kHasValue;
+    kBasicFlushStats.num_output_files = kHasValue;
+  }
 
  protected:
-  std::atomic_bool enable_per_key_placement = true;
+  static constexpr uint8_t kHasValue = 1;
 
-  CompactionJobStats job_stats;
+  InternalStats::CompactionStats kBasicCompStats;
+  InternalStats::CompactionStats kBasicPerKeyPlacementCompStats;
+  InternalStats::CompactionOutputsStats kBasicPerLevelStats;
+  InternalStats::CompactionStats kBasicFlushStats;
+
+  std::atomic_bool enable_per_key_placement = true;
 
   void SetUp() override {
     SyncPoint::GetInstance()->SetCallBack(
@@ -79,36 +108,21 @@ class TieredCompactionTest : public DBTestBase {
 
   // Verify the compaction stats, the stats are roughly compared
   void VerifyCompactionStats(
-      const std::vector<InternalStats::CompactionStats>& expected_stats,
-      const InternalStats::CompactionStats& expected_pl_stats,
-      size_t output_level, uint64_t num_input_range_del = 0) {
+      const std::vector<InternalStats::CompactionStats>& expect_stats,
+      const InternalStats::CompactionStats& expect_pl_stats) {
     const std::vector<InternalStats::CompactionStats>& stats =
         GetCompactionStats();
-    const size_t kLevels = expected_stats.size();
+    const size_t kLevels = expect_stats.size();
     ASSERT_EQ(kLevels, stats.size());
-    ASSERT_TRUE(output_level < kLevels);
 
-    for (size_t level = 0; level < kLevels; level++) {
-      VerifyCompactionStats(stats[level], expected_stats[level]);
+    for (auto it = stats.begin(), expect = expect_stats.begin();
+         it != stats.end(); it++, expect++) {
+      VerifyCompactionStats(*it, *expect);
     }
 
     const InternalStats::CompactionStats& pl_stats =
         GetPerKeyPlacementCompactionStats();
-    VerifyCompactionStats(pl_stats, expected_pl_stats);
-
-    const auto& output_level_stats = stats[output_level];
-    CompactionJobStats expected_job_stats;
-    expected_job_stats.cpu_micros = output_level_stats.cpu_micros;
-    expected_job_stats.num_input_files =
-        output_level_stats.num_input_files_in_output_level +
-        output_level_stats.num_input_files_in_non_output_levels;
-    expected_job_stats.num_input_records =
-        output_level_stats.num_input_records - num_input_range_del;
-    expected_job_stats.num_output_files =
-        output_level_stats.num_output_files + pl_stats.num_output_files;
-    expected_job_stats.num_output_records =
-        output_level_stats.num_output_records + pl_stats.num_output_records;
-    VerifyCompactionJobStats(job_stats, expected_job_stats);
+    VerifyCompactionStats(pl_stats, expect_pl_stats);
   }
 
   void ResetAllStats(std::vector<InternalStats::CompactionStats>& stats,
@@ -125,53 +139,78 @@ class TieredCompactionTest : public DBTestBase {
   }
 
  private:
+  void CompareStats(uint64_t val, uint64_t expect) {
+    if (expect > 0) {
+      ASSERT_TRUE(val > 0);
+    } else {
+      ASSERT_EQ(val, 0);
+    }
+  }
+
   void VerifyCompactionStats(
       const InternalStats::CompactionStats& stats,
       const InternalStats::CompactionStats& expect_stats) {
-    ASSERT_EQ(stats.micros > 0, expect_stats.micros > 0);
-    ASSERT_EQ(stats.cpu_micros > 0, expect_stats.cpu_micros > 0);
-
-    // Hard to get consistent byte sizes of SST files.
-    // Use ASSERT_NEAR for comparison
-    ASSERT_NEAR(stats.bytes_read_non_output_levels * 1.0f,
-                expect_stats.bytes_read_non_output_levels * 1.0f,
-                stats.bytes_read_non_output_levels * 0.5f);
-    ASSERT_NEAR(stats.bytes_read_output_level * 1.0f,
-                expect_stats.bytes_read_output_level * 1.0f,
-                stats.bytes_read_output_level * 0.5f);
-    ASSERT_NEAR(stats.bytes_read_blob * 1.0f,
-                expect_stats.bytes_read_blob * 1.0f,
-                stats.bytes_read_blob * 0.5f);
-    ASSERT_NEAR(stats.bytes_written * 1.0f, expect_stats.bytes_written * 1.0f,
-                stats.bytes_written * 0.5f);
-
-    ASSERT_EQ(stats.bytes_moved, expect_stats.bytes_moved);
-    ASSERT_EQ(stats.num_input_files_in_non_output_levels,
-              expect_stats.num_input_files_in_non_output_levels);
-    ASSERT_EQ(stats.num_input_files_in_output_level,
-              expect_stats.num_input_files_in_output_level);
-    ASSERT_EQ(stats.num_output_files, expect_stats.num_output_files);
-    ASSERT_EQ(stats.num_output_files_blob, expect_stats.num_output_files_blob);
-    ASSERT_EQ(stats.num_input_records, expect_stats.num_input_records);
-    ASSERT_EQ(stats.num_dropped_records, expect_stats.num_dropped_records);
-    ASSERT_EQ(stats.num_output_records, expect_stats.num_output_records);
-
+    CompareStats(stats.micros, expect_stats.micros);
+    CompareStats(stats.cpu_micros, expect_stats.cpu_micros);
+    CompareStats(stats.bytes_read_non_output_levels,
+                 expect_stats.bytes_read_non_output_levels);
+    CompareStats(stats.bytes_read_output_level,
+                 expect_stats.bytes_read_output_level);
+    CompareStats(stats.bytes_read_blob, expect_stats.bytes_read_blob);
+    CompareStats(stats.bytes_written, expect_stats.bytes_written);
+    CompareStats(stats.bytes_moved, expect_stats.bytes_moved);
+    CompareStats(stats.num_input_files_in_non_output_levels,
+                 expect_stats.num_input_files_in_non_output_levels);
+    CompareStats(stats.num_input_files_in_output_level,
+                 expect_stats.num_input_files_in_output_level);
+    CompareStats(stats.num_output_files, expect_stats.num_output_files);
+    CompareStats(stats.num_output_files_blob,
+                 expect_stats.num_output_files_blob);
+    CompareStats(stats.num_input_records, expect_stats.num_input_records);
+    CompareStats(stats.num_dropped_records, expect_stats.num_dropped_records);
+    CompareStats(stats.num_output_records, expect_stats.num_output_records);
     ASSERT_EQ(stats.count, expect_stats.count);
     for (int i = 0; i < static_cast<int>(CompactionReason::kNumOfReasons);
          i++) {
       ASSERT_EQ(stats.counts[i], expect_stats.counts[i]);
     }
   }
-
-  void VerifyCompactionJobStats(const CompactionJobStats& stats,
-                                const CompactionJobStats& expected_stats) {
-    ASSERT_EQ(stats.cpu_micros, expected_stats.cpu_micros);
-    ASSERT_EQ(stats.num_input_files, expected_stats.num_input_files);
-    ASSERT_EQ(stats.num_input_records, expected_stats.num_input_records);
-    ASSERT_EQ(job_stats.num_output_files, expected_stats.num_output_files);
-    ASSERT_EQ(job_stats.num_output_records, expected_stats.num_output_records);
-  }
 };
+
+TEST_F(TieredCompactionTest, BlahPrecludeLastLevel) {
+  const int kNumTrigger = 4;
+  const int kNumLevels = 7;
+  const int kNumKeys = 100;
+
+  Options options = CurrentOptions();
+  options.compaction_style = kCompactionStyleUniversal;
+  options.last_level_temperature = Temperature::kCold;
+  options.level0_file_num_compaction_trigger = 4;
+  options.max_subcompactions = 10;
+  options.num_levels = kNumLevels;
+  DestroyAndReopen(options);
+  // ReopenWithCompactionService(&options);
+
+  // This is simpler than setting up mock time to make the user option work.
+  SyncPoint::GetInstance()->SetCallBack(
+      "CompactionJob::PrepareTimes():preclude_last_level_min_seqno",
+      [&](void* arg) { *static_cast<SequenceNumber*>(arg) = 100; });
+  SyncPoint::GetInstance()->EnableProcessing();
+
+  for (int i = 0; i < kNumTrigger - 1; i++) {
+    for (int j = 0; j < kNumKeys; j++) {
+      ASSERT_OK(Put(Key(i * 10 + j), "value" + std::to_string(i)));
+    }
+    ASSERT_OK(Flush());
+  }
+  // ASSERT_OK(dbfull()->TEST_WaitForCompact());
+  ASSERT_OK(db_->CompactRange(CompactRangeOptions(), nullptr, nullptr));
+
+  // Data split between penultimate (kUnknown) and last (kCold) levels
+  ASSERT_EQ("0,0,0,0,0,1,1", FilesPerLevel());
+  ASSERT_GT(GetSstSizeHelper(Temperature::kUnknown), 0);
+  ASSERT_GT(GetSstSizeHelper(Temperature::kCold), 0);
+}
 
 TEST_F(TieredCompactionTest, SequenceBasedTieredStorageUniversal) {
   const int kNumTrigger = 4;
@@ -195,39 +234,19 @@ TEST_F(TieredCompactionTest, SequenceBasedTieredStorageUniversal) {
       [&](void* arg) {
         *static_cast<SequenceNumber*>(arg) = latest_cold_seq.load();
       });
-  SyncPoint::GetInstance()->SetCallBack(
-      "CompactionJob::Install:AfterUpdateCompactionJobStats", [&](void* arg) {
-        job_stats.Reset();
-        job_stats.Add(*(static_cast<CompactionJobStats*>(arg)));
-      });
   SyncPoint::GetInstance()->EnableProcessing();
 
   std::vector<InternalStats::CompactionStats> expect_stats(kNumLevels);
+  InternalStats::CompactionStats& last_stats = expect_stats[kLastLevel];
   InternalStats::CompactionStats expect_pl_stats;
-
-  // Put keys in the following way to create overlaps
-  // First file from 0 ~ 99
-  // Second file from 10 ~ 109
-  // ...
-  size_t bytes_per_file = 1952;
-  uint64_t total_input_key_count = kNumTrigger * kNumKeys;
-  uint64_t total_output_key_count = 130;  // 0 ~ 129
 
   for (int i = 0; i < kNumTrigger; i++) {
     for (int j = 0; j < kNumKeys; j++) {
       ASSERT_OK(Put(Key(i * 10 + j), "value" + std::to_string(i)));
     }
     ASSERT_OK(Flush());
-
     seq_history.emplace_back(dbfull()->GetLatestSequenceNumber());
-    InternalStats::CompactionStats flush_stats(CompactionReason::kFlush, 1);
-    flush_stats.cpu_micros = 1;
-    flush_stats.micros = 1;
-    flush_stats.bytes_written = bytes_per_file;
-    flush_stats.num_output_files = 1;
-    flush_stats.num_input_records = kNumKeys;
-    flush_stats.num_output_records = kNumKeys;
-    expect_stats[0].Add(flush_stats);
+    expect_stats[0].Add(kBasicFlushStats);
   }
   ASSERT_OK(dbfull()->TEST_WaitForCompact());
 
@@ -237,97 +256,32 @@ TEST_F(TieredCompactionTest, SequenceBasedTieredStorageUniversal) {
   ASSERT_GT(GetSstSizeHelper(Temperature::kUnknown), 0);
   ASSERT_EQ(GetSstSizeHelper(Temperature::kCold), 0);
 
-  uint64_t bytes_written_penultimate_level =
-      GetPerKeyPlacementCompactionStats().bytes_written;
+  // basic compaction stats are still counted to the last level
+  expect_stats[kLastLevel].Add(kBasicCompStats);
+  expect_pl_stats.Add(kBasicPerKeyPlacementCompStats);
 
-  // TODO - Use designated initializer when c++20 support is required
-  {
-    InternalStats::CompactionStats last_level_compaction_stats(
-        CompactionReason::kUniversalSizeAmplification, 1);
-    last_level_compaction_stats.cpu_micros = 1;
-    last_level_compaction_stats.micros = 1;
-    last_level_compaction_stats.bytes_written = 0;
-    last_level_compaction_stats.bytes_read_non_output_levels =
-        bytes_per_file * kNumTrigger;
-    last_level_compaction_stats.num_input_files_in_non_output_levels =
-        kNumTrigger;
-    last_level_compaction_stats.num_input_records = total_input_key_count;
-    last_level_compaction_stats.num_dropped_records =
-        total_input_key_count - total_output_key_count;
-    last_level_compaction_stats.num_output_records = 0;
-    last_level_compaction_stats.num_output_files = 0;
-    expect_stats[kLastLevel].Add(last_level_compaction_stats);
-  }
-  {
-    InternalStats::CompactionStats penultimate_level_compaction_stats(
-        CompactionReason::kUniversalSizeAmplification, 1);
-    penultimate_level_compaction_stats.cpu_micros = 1;
-    penultimate_level_compaction_stats.micros = 1;
-    penultimate_level_compaction_stats.bytes_written =
-        bytes_written_penultimate_level;
-    penultimate_level_compaction_stats.num_output_files = 1;
-    penultimate_level_compaction_stats.num_output_records =
-        total_output_key_count;
-    expect_pl_stats.Add(penultimate_level_compaction_stats);
-  }
-  VerifyCompactionStats(expect_stats, expect_pl_stats, kLastLevel);
+  VerifyCompactionStats(expect_stats, expect_pl_stats);
 
   ResetAllStats(expect_stats, expect_pl_stats);
 
   // move forward the cold_seq to split the file into 2 levels, so should have
-  // both the last level stats and the penultimate level stats
+  // both the last level stats and the output_to_penultimate_level stats
   latest_cold_seq = seq_history[0];
   ASSERT_OK(db_->CompactRange(CompactRangeOptions(), nullptr, nullptr));
-  ASSERT_OK(dbfull()->TEST_WaitForCompact());
   ASSERT_EQ("0,0,0,0,0,1,1", FilesPerLevel());
 
   ASSERT_GT(GetSstSizeHelper(Temperature::kUnknown), 0);
   ASSERT_GT(GetSstSizeHelper(Temperature::kCold), 0);
 
-  // Now update the input count to be the total count from the previous
-  total_input_key_count = total_output_key_count;
-  uint64_t moved_to_last_level_key_count = 10;
+  last_stats.Add(kBasicCompStats);
+  last_stats.ResetCompactionReason(CompactionReason::kManualCompaction);
+  last_stats.Add(kBasicPerLevelStats);
+  last_stats.num_dropped_records = 0;
+  expect_pl_stats.Add(kBasicPerKeyPlacementCompStats);
+  expect_pl_stats.ResetCompactionReason(CompactionReason::kManualCompaction);
+  VerifyCompactionStats(expect_stats, expect_pl_stats);
 
-  // bytes read in non output = bytes written in penultimate level from previous
-  uint64_t bytes_read_in_non_output_level = bytes_written_penultimate_level;
-  uint64_t bytes_written_output_level =
-      GetCompactionStats()[kLastLevel].bytes_written;
-
-  // Now get the new bytes written in penultimate level
-  bytes_written_penultimate_level =
-      GetPerKeyPlacementCompactionStats().bytes_written;
-  {
-    InternalStats::CompactionStats last_level_compaction_stats(
-        CompactionReason::kManualCompaction, 1);
-    last_level_compaction_stats.cpu_micros = 1;
-    last_level_compaction_stats.micros = 1;
-    last_level_compaction_stats.bytes_written = bytes_written_output_level;
-    last_level_compaction_stats.bytes_read_non_output_levels =
-        bytes_read_in_non_output_level;
-    last_level_compaction_stats.num_input_files_in_non_output_levels = 1;
-    last_level_compaction_stats.num_input_records = total_input_key_count;
-    last_level_compaction_stats.num_dropped_records =
-        total_input_key_count - total_output_key_count;
-    last_level_compaction_stats.num_output_records =
-        moved_to_last_level_key_count;
-    last_level_compaction_stats.num_output_files = 1;
-    expect_stats[kLastLevel].Add(last_level_compaction_stats);
-  }
-  {
-    InternalStats::CompactionStats penultimate_level_compaction_stats(
-        CompactionReason::kManualCompaction, 1);
-    penultimate_level_compaction_stats.cpu_micros = 1;
-    penultimate_level_compaction_stats.micros = 1;
-    penultimate_level_compaction_stats.bytes_written =
-        bytes_written_penultimate_level;
-    penultimate_level_compaction_stats.num_output_files = 1;
-    penultimate_level_compaction_stats.num_output_records =
-        total_output_key_count - moved_to_last_level_key_count;
-    expect_pl_stats.Add(penultimate_level_compaction_stats);
-  }
-  VerifyCompactionStats(expect_stats, expect_pl_stats, kLastLevel);
-
-  // delete all cold data, so all data will be on proximal level
+  // delete all cold data, so all data will be on penultimate level
   for (int i = 0; i < 10; i++) {
     ASSERT_OK(Delete(Key(i)));
   }
@@ -336,54 +290,17 @@ TEST_F(TieredCompactionTest, SequenceBasedTieredStorageUniversal) {
   ResetAllStats(expect_stats, expect_pl_stats);
 
   ASSERT_OK(db_->CompactRange(CompactRangeOptions(), nullptr, nullptr));
-  ASSERT_OK(dbfull()->TEST_WaitForCompact());
   ASSERT_EQ("0,0,0,0,0,1", FilesPerLevel());
   ASSERT_GT(GetSstSizeHelper(Temperature::kUnknown), 0);
   ASSERT_EQ(GetSstSizeHelper(Temperature::kCold), 0);
 
-  // 10 tombstones added
-  total_input_key_count = total_input_key_count + 10;
-  total_output_key_count = total_output_key_count - 10;
-
-  auto last_level_stats = GetCompactionStats()[kLastLevel];
-  bytes_written_penultimate_level =
-      GetPerKeyPlacementCompactionStats().bytes_written;
-
-  ASSERT_LT(bytes_written_penultimate_level,
-            last_level_stats.bytes_read_non_output_levels +
-                last_level_stats.bytes_read_output_level);
-  {
-    InternalStats::CompactionStats last_level_compaction_stats(
-        CompactionReason::kManualCompaction, 1);
-    last_level_compaction_stats.cpu_micros = 1;
-    last_level_compaction_stats.micros = 1;
-    last_level_compaction_stats.bytes_written = 0;
-    last_level_compaction_stats.bytes_read_non_output_levels =
-        last_level_stats.bytes_read_non_output_levels;
-    last_level_compaction_stats.bytes_read_output_level =
-        last_level_stats.bytes_read_output_level;
-    last_level_compaction_stats.num_input_files_in_non_output_levels = 2;
-    last_level_compaction_stats.num_input_files_in_output_level = 1;
-    last_level_compaction_stats.num_input_records = total_input_key_count;
-    last_level_compaction_stats.num_dropped_records =
-        total_input_key_count - total_output_key_count;
-    last_level_compaction_stats.num_output_records = 0;
-    last_level_compaction_stats.num_output_files = 0;
-    expect_stats[kLastLevel].Add(last_level_compaction_stats);
-  }
-  {
-    InternalStats::CompactionStats penultimate_level_compaction_stats(
-        CompactionReason::kManualCompaction, 1);
-    penultimate_level_compaction_stats.cpu_micros = 1;
-    penultimate_level_compaction_stats.micros = 1;
-    penultimate_level_compaction_stats.bytes_written =
-        bytes_written_penultimate_level;
-    penultimate_level_compaction_stats.num_output_files = 1;
-    penultimate_level_compaction_stats.num_output_records =
-        total_output_key_count;
-    expect_pl_stats.Add(penultimate_level_compaction_stats);
-  }
-  VerifyCompactionStats(expect_stats, expect_pl_stats, kLastLevel);
+  last_stats.Add(kBasicCompStats);
+  last_stats.ResetCompactionReason(CompactionReason::kManualCompaction);
+  last_stats.bytes_read_output_level = kHasValue;
+  last_stats.num_input_files_in_output_level = kHasValue;
+  expect_pl_stats.Add(kBasicPerKeyPlacementCompStats);
+  expect_pl_stats.ResetCompactionReason(CompactionReason::kManualCompaction);
+  VerifyCompactionStats(expect_stats, expect_pl_stats);
 
   // move forward the cold_seq again with range delete, take a snapshot to keep
   // the range dels in both cold and hot SSTs
@@ -393,7 +310,6 @@ TEST_F(TieredCompactionTest, SequenceBasedTieredStorageUniversal) {
   ASSERT_OK(
       db_->DeleteRange(WriteOptions(), db_->DefaultColumnFamily(), start, end));
   ASSERT_OK(Flush());
-  uint64_t num_input_range_del = 1;
 
   ResetAllStats(expect_stats, expect_pl_stats);
 
@@ -402,49 +318,12 @@ TEST_F(TieredCompactionTest, SequenceBasedTieredStorageUniversal) {
   ASSERT_GT(GetSstSizeHelper(Temperature::kUnknown), 0);
   ASSERT_GT(GetSstSizeHelper(Temperature::kCold), 0);
 
-  // Previous output + one delete range
-  total_input_key_count = total_output_key_count + num_input_range_del;
-  moved_to_last_level_key_count = 20;
-
-  last_level_stats = GetCompactionStats()[kLastLevel];
-  bytes_written_penultimate_level =
-      GetPerKeyPlacementCompactionStats().bytes_written;
-  // Expected to write more in last level
-  ASSERT_GT(bytes_written_penultimate_level, last_level_stats.bytes_written);
-  {
-    InternalStats::CompactionStats last_level_compaction_stats(
-        CompactionReason::kManualCompaction, 1);
-    last_level_compaction_stats.cpu_micros = 1;
-    last_level_compaction_stats.micros = 1;
-    last_level_compaction_stats.bytes_written = last_level_stats.bytes_written;
-    last_level_compaction_stats.bytes_read_non_output_levels =
-        last_level_stats.bytes_read_non_output_levels;
-    last_level_compaction_stats.bytes_read_output_level = 0;
-    last_level_compaction_stats.num_input_files_in_non_output_levels = 2;
-    last_level_compaction_stats.num_input_files_in_output_level = 0;
-    last_level_compaction_stats.num_input_records = total_input_key_count;
-    last_level_compaction_stats.num_dropped_records =
-        num_input_range_del;  // delete range tombstone
-    last_level_compaction_stats.num_output_records =
-        moved_to_last_level_key_count;
-    last_level_compaction_stats.num_output_files = 1;
-    expect_stats[kLastLevel].Add(last_level_compaction_stats);
-  }
-  {
-    InternalStats::CompactionStats penultimate_level_compaction_stats(
-        CompactionReason::kManualCompaction, 1);
-    penultimate_level_compaction_stats.cpu_micros = 1;
-    penultimate_level_compaction_stats.micros = 1;
-    penultimate_level_compaction_stats.bytes_written =
-        bytes_written_penultimate_level;
-    penultimate_level_compaction_stats.num_output_files = 1;
-    penultimate_level_compaction_stats.num_output_records =
-        total_input_key_count - moved_to_last_level_key_count -
-        num_input_range_del;
-    expect_pl_stats.Add(penultimate_level_compaction_stats);
-  }
-  VerifyCompactionStats(expect_stats, expect_pl_stats, kLastLevel,
-                        num_input_range_del);
+  last_stats.Add(kBasicCompStats);
+  last_stats.Add(kBasicPerLevelStats);
+  last_stats.ResetCompactionReason(CompactionReason::kManualCompaction);
+  expect_pl_stats.Add(kBasicPerKeyPlacementCompStats);
+  expect_pl_stats.ResetCompactionReason(CompactionReason::kManualCompaction);
+  VerifyCompactionStats(expect_stats, expect_pl_stats);
 
   // verify data
   std::string value;
@@ -494,14 +373,11 @@ TEST_F(TieredCompactionTest, SequenceBasedTieredStorageUniversal) {
   ASSERT_GT(GetSstSizeHelper(Temperature::kCold), 0);
 }
 
-// This test was essentially for a hacked-up version on future functionality.
-// It can be resurrected if/when a form of range-based tiering is properly
-// implemented.
-// TODO - Add stats verification when adding this test back
-TEST_F(TieredCompactionTest, DISABLED_RangeBasedTieredStorageUniversal) {
+TEST_F(TieredCompactionTest, RangeBasedTieredStorageUniversal) {
   const int kNumTrigger = 4;
   const int kNumLevels = 7;
   const int kNumKeys = 100;
+  const int kLastLevel = kNumLevels - 1;
 
   auto options = CurrentOptions();
   options.compaction_style = kCompactionStyleUniversal;
@@ -520,13 +396,14 @@ TEST_F(TieredCompactionTest, DISABLED_RangeBasedTieredStorageUniversal) {
       "CompactionIterator::PrepareOutput.context", [&](void* arg) {
         auto context = static_cast<PerKeyPlacementContext*>(arg);
         MutexLock l(&mutex);
-        context->output_to_proximal_level =
+        context->output_to_penultimate_level =
             cmp->Compare(context->key, hot_start) >= 0 &&
             cmp->Compare(context->key, hot_end) < 0;
       });
   SyncPoint::GetInstance()->EnableProcessing();
 
   std::vector<InternalStats::CompactionStats> expect_stats(kNumLevels);
+  InternalStats::CompactionStats& last_stats = expect_stats[kLastLevel];
   InternalStats::CompactionStats expect_pl_stats;
 
   for (int i = 0; i < kNumTrigger; i++) {
@@ -534,15 +411,21 @@ TEST_F(TieredCompactionTest, DISABLED_RangeBasedTieredStorageUniversal) {
       ASSERT_OK(Put(Key(j), "value" + std::to_string(j)));
     }
     ASSERT_OK(Flush());
+    expect_stats[0].Add(kBasicFlushStats);
   }
   ASSERT_OK(dbfull()->TEST_WaitForCompact());
   ASSERT_EQ("0,0,0,0,0,1,1", FilesPerLevel());
   ASSERT_GT(GetSstSizeHelper(Temperature::kUnknown), 0);
   ASSERT_GT(GetSstSizeHelper(Temperature::kCold), 0);
 
+  last_stats.Add(kBasicCompStats);
+  last_stats.Add(kBasicPerLevelStats);
+  expect_pl_stats.Add(kBasicPerKeyPlacementCompStats);
+  VerifyCompactionStats(expect_stats, expect_pl_stats);
+
   ResetAllStats(expect_stats, expect_pl_stats);
 
-  // change to all cold, no output_to_proximal_level output
+  // change to all cold, no output_to_penultimate_level output
   {
     MutexLock l(&mutex);
     hot_start = Key(100);
@@ -553,6 +436,14 @@ TEST_F(TieredCompactionTest, DISABLED_RangeBasedTieredStorageUniversal) {
   ASSERT_EQ(GetSstSizeHelper(Temperature::kUnknown), 0);
   ASSERT_GT(GetSstSizeHelper(Temperature::kCold), 0);
 
+  last_stats.Add(kBasicCompStats);
+  last_stats.ResetCompactionReason(CompactionReason::kManualCompaction);
+  last_stats.Add(kBasicPerLevelStats);
+  last_stats.num_dropped_records = 0;
+  last_stats.bytes_read_output_level = kHasValue;
+  last_stats.num_input_files_in_output_level = kHasValue;
+  VerifyCompactionStats(expect_stats, expect_pl_stats);
+
   // change to all hot, universal compaction support moving data to up level if
   // it's within compaction level range.
   {
@@ -562,7 +453,7 @@ TEST_F(TieredCompactionTest, DISABLED_RangeBasedTieredStorageUniversal) {
   }
 
   // No data is moved from cold tier to hot tier because no input files from L5
-  // or higher, it's not safe to move data to output_to_proximal_level level.
+  // or higher, it's not safe to move data to output_to_penultimate_level level.
   ASSERT_OK(db_->CompactRange(CompactRangeOptions(), nullptr, nullptr));
   ASSERT_EQ("0,0,0,0,0,1", FilesPerLevel());
 
@@ -583,12 +474,12 @@ TEST_F(TieredCompactionTest, DISABLED_RangeBasedTieredStorageUniversal) {
   {
     MutexLock l(&mutex);
     hot_start = Key(1);
-    hot_end = Key(300);
+    hot_end = Key(1000);
   }
 
   // generate files just enough to trigger compaction
   for (int i = 0; i < kNumTrigger - 1; i++) {
-    for (int j = 0; j < 300; j++) {
+    for (int j = 0; j < 1000; j++) {
       ASSERT_OK(Put(Key(j), "value" + std::to_string(j)));
     }
     ASSERT_OK(Flush());
@@ -637,7 +528,6 @@ TEST_F(TieredCompactionTest, DISABLED_RangeBasedTieredStorageUniversal) {
   // verify data
   std::string value;
   for (int i = 0; i < kNumKeys; i++) {
-    SCOPED_TRACE(Key(i));
     if (i < 70) {
       ASSERT_TRUE(db_->Get(ReadOptions(), Key(i), &value).IsNotFound());
     } else {
@@ -708,7 +598,7 @@ TEST_F(TieredCompactionTest, LevelColdRangeDelete) {
 
   // 20->30 will be marked as cold data, but it cannot be placed to cold tier
   // (bottommost) otherwise, it will be "deleted" by the range del in
-  // output_to_proximal_level level verify that these data will be able to
+  // output_to_penultimate_level level verify that these data will be able to
   // queried
   for (int i = 20; i < 30; i++) {
     ASSERT_OK(Put(Key(i), "value" + std::to_string(i)));
@@ -818,17 +708,17 @@ TEST_F(TieredCompactionTest, LevelOutofBoundaryRangeDelete) {
   std::vector<std::vector<FileMetaData>> level_to_files;
   dbfull()->TEST_GetFilesMetaData(dbfull()->DefaultColumnFamily(),
                                   &level_to_files);
-  // range tombstone is in the proximal level
-  const int proximal_level = kNumLevels - 2;
-  ASSERT_EQ(level_to_files[proximal_level].size(), 1);
-  ASSERT_EQ(level_to_files[proximal_level][0].num_entries, 1);
-  ASSERT_EQ(level_to_files[proximal_level][0].num_deletions, 1);
-  ASSERT_EQ(level_to_files[proximal_level][0].temperature,
+  // range tombstone is in the penultimate level
+  const int penultimate_level = kNumLevels - 2;
+  ASSERT_EQ(level_to_files[penultimate_level].size(), 1);
+  ASSERT_EQ(level_to_files[penultimate_level][0].num_entries, 1);
+  ASSERT_EQ(level_to_files[penultimate_level][0].num_deletions, 1);
+  ASSERT_EQ(level_to_files[penultimate_level][0].temperature,
             Temperature::kUnknown);
 
   ASSERT_GT(GetSstSizeHelper(Temperature::kCold), 0);
   ASSERT_EQ("0,1,10",
-            FilesPerLevel());  // one file is at the proximal level which
+            FilesPerLevel());  // one file is at the penultimate level which
                                // only contains a range delete
 
   // Add 2 hot keys, each is a new SST, they will be placed in the same level as
@@ -842,7 +732,7 @@ TEST_F(TieredCompactionTest, LevelOutofBoundaryRangeDelete) {
 
   ASSERT_OK(db_->CompactRange(cro, nullptr, nullptr));
   ASSERT_EQ("0,2,10",
-            FilesPerLevel());  // one file is at the proximal level
+            FilesPerLevel());  // one file is at the penultimate level
                                // which only contains a range delete
   std::vector<LiveFileMetaData> live_file_meta;
   db_->GetLiveFilesMetaData(&live_file_meta);
@@ -852,7 +742,7 @@ TEST_F(TieredCompactionTest, LevelOutofBoundaryRangeDelete) {
     if (meta.num_deletions > 0) {
       // found SST with del, which has 2 entries, one for data one for range del
       ASSERT_EQ(meta.level,
-                kNumLevels - 2);  // output to proximal level
+                kNumLevels - 2);  // output to penultimate level
       ASSERT_EQ(meta.num_entries, 2);
       ASSERT_EQ(meta.num_deletions, 1);
       found_sst_with_del = true;
@@ -863,7 +753,7 @@ TEST_F(TieredCompactionTest, LevelOutofBoundaryRangeDelete) {
 
   // release the first snapshot and compact, which should compact the range del
   // but new inserted key `0` and `6` are still hot data which will be placed on
-  // the proximal level
+  // the penultimate level
   db_->ReleaseSnapshot(snap);
   ASSERT_OK(db_->CompactRange(cro, nullptr, nullptr));
   ASSERT_EQ("0,2,7", FilesPerLevel());
@@ -879,7 +769,7 @@ TEST_F(TieredCompactionTest, LevelOutofBoundaryRangeDelete) {
   ASSERT_FALSE(found_sst_with_del);
 
   // Now make all data cold, key 0 will be moved to the last level, but key 6 is
-  // still in snap2, so it will be kept at the proximal level
+  // still in snap2, so it will be kept at the penultimate level
   latest_cold_seq = dbfull()->GetLatestSequenceNumber();
   ASSERT_OK(db_->CompactRange(cro, nullptr, nullptr));
   ASSERT_EQ("0,1,8", FilesPerLevel());
@@ -924,7 +814,7 @@ TEST_F(TieredCompactionTest, UniversalRangeDelete) {
   }
   ASSERT_OK(Flush());
 
-  // compact to the proximal level with 10 files
+  // compact to the penultimate level with 10 files
   CompactRangeOptions cro;
   cro.bottommost_level_compaction = BottommostLevelCompaction::kForce;
   ASSERT_OK(db_->CompactRange(cro, nullptr, nullptr));
@@ -951,7 +841,7 @@ TEST_F(TieredCompactionTest, UniversalRangeDelete) {
 
   ASSERT_EQ("0,0,0,0,0,0,8", FilesPerLevel());
 
-  // range del with snapshot should be preserved in the proximal level
+  // range del with snapshot should be preserved in the penultimate level
   auto snap = db_->GetSnapshot();
 
   start = Key(6);
@@ -982,7 +872,7 @@ TEST_F(TieredCompactionTest, UniversalRangeDelete) {
     if (meta.num_deletions > 0) {
       // found SST with del, which has 2 entries, one for data one for range del
       ASSERT_EQ(meta.level,
-                kNumLevels - 2);  // output_to_proximal_level level
+                kNumLevels - 2);  // output_to_penultimate_level level
       ASSERT_EQ(meta.num_entries, 2);
       ASSERT_EQ(meta.num_deletions, 1);
       found_sst_with_del = true;
@@ -1031,8 +921,6 @@ TEST_F(TieredCompactionTest, SequenceBasedTieredStorageLevel) {
   const int kNumKeys = 100;
   const int kLastLevel = kNumLevels - 1;
 
-  int output_level = 0;
-
   auto options = CurrentOptions();
   SetColdTemperature(options);
   options.level0_file_num_compaction_trigger = kNumTrigger;
@@ -1049,42 +937,18 @@ TEST_F(TieredCompactionTest, SequenceBasedTieredStorageLevel) {
       [&](void* arg) {
         *static_cast<SequenceNumber*>(arg) = latest_cold_seq.load();
       });
-  SyncPoint::GetInstance()->SetCallBack(
-      "CompactionJob::Install:AfterUpdateCompactionJobStats", [&](void* arg) {
-        job_stats.Reset();
-        job_stats.Add(*(static_cast<CompactionJobStats*>(arg)));
-      });
-  SyncPoint::GetInstance()->SetCallBack(
-      "CompactionJob::ProcessKeyValueCompaction()::Processing", [&](void* arg) {
-        auto compaction = static_cast<Compaction*>(arg);
-        output_level = compaction->output_level();
-      });
   SyncPoint::GetInstance()->EnableProcessing();
 
   std::vector<InternalStats::CompactionStats> expect_stats(kNumLevels);
+  InternalStats::CompactionStats& last_stats = expect_stats[kLastLevel];
   InternalStats::CompactionStats expect_pl_stats;
-
-  // Put keys in the following way to create overlaps
-  // First file from 0 ~ 99
-  // Second file from 10 ~ 109
-  // ...
-  size_t bytes_per_file = 1952;
-  uint64_t total_input_key_count = kNumTrigger * kNumKeys;
-  uint64_t total_output_key_count = 130;  // 0 ~ 129
 
   for (int i = 0; i < kNumTrigger; i++) {
     for (int j = 0; j < kNumKeys; j++) {
       ASSERT_OK(Put(Key(i * 10 + j), "value" + std::to_string(i)));
     }
     ASSERT_OK(Flush());
-    InternalStats::CompactionStats flush_stats(CompactionReason::kFlush, 1);
-    flush_stats.cpu_micros = 1;
-    flush_stats.micros = 1;
-    flush_stats.bytes_written = bytes_per_file;
-    flush_stats.num_output_files = 1;
-    flush_stats.num_input_records = kNumKeys;
-    flush_stats.num_output_records = kNumKeys;
-    expect_stats[0].Add(flush_stats);
+    expect_stats[0].Add(kBasicFlushStats);
   }
   ASSERT_OK(dbfull()->TEST_WaitForCompact());
 
@@ -1093,30 +957,10 @@ TEST_F(TieredCompactionTest, SequenceBasedTieredStorageLevel) {
   ASSERT_GT(GetSstSizeHelper(Temperature::kUnknown), 0);
   ASSERT_EQ(GetSstSizeHelper(Temperature::kCold), 0);
 
-  uint64_t bytes_written_output_level =
-      GetCompactionStats()[output_level].bytes_written;
-  ASSERT_GT(bytes_written_output_level, 0);
-
-  {
-    InternalStats::CompactionStats output_level_compaction_stats(
-        CompactionReason::kLevelL0FilesNum, 1);
-    output_level_compaction_stats.cpu_micros = 1;
-    output_level_compaction_stats.micros = 1;
-    output_level_compaction_stats.bytes_written = bytes_written_output_level;
-    output_level_compaction_stats.bytes_read_non_output_levels =
-        bytes_per_file * kNumTrigger;
-    output_level_compaction_stats.bytes_read_output_level = 0;
-    output_level_compaction_stats.num_input_files_in_non_output_levels =
-        kNumTrigger;
-    output_level_compaction_stats.num_input_files_in_output_level = 0;
-    output_level_compaction_stats.num_input_records = total_input_key_count;
-    output_level_compaction_stats.num_dropped_records =
-        total_input_key_count - total_output_key_count;
-    output_level_compaction_stats.num_output_records = total_output_key_count;
-    output_level_compaction_stats.num_output_files = 1;
-    expect_stats[output_level].Add(output_level_compaction_stats);
-  }
-  VerifyCompactionStats(expect_stats, expect_pl_stats, output_level);
+  expect_stats[1].Add(kBasicCompStats);
+  expect_stats[1].Add(kBasicPerLevelStats);
+  expect_stats[1].ResetCompactionReason(CompactionReason::kLevelL0FilesNum);
+  VerifyCompactionStats(expect_stats, expect_pl_stats);
 
   // move all data to the last level
   MoveFilesToLevel(kLastLevel);
@@ -1131,26 +975,15 @@ TEST_F(TieredCompactionTest, SequenceBasedTieredStorageLevel) {
   ASSERT_EQ(GetSstSizeHelper(Temperature::kUnknown), 0);
   ASSERT_GT(GetSstSizeHelper(Temperature::kCold), 0);
 
-  total_input_key_count = total_output_key_count;
-  {
-    InternalStats::CompactionStats output_level_compaction_stats(
-        CompactionReason::kManualCompaction, 1);
-    output_level_compaction_stats.cpu_micros = 1;
-    output_level_compaction_stats.micros = 1;
-    output_level_compaction_stats.bytes_written = bytes_written_output_level;
-    output_level_compaction_stats.bytes_read_non_output_levels = 0;
-    output_level_compaction_stats.bytes_read_output_level =
-        bytes_written_output_level;
-    output_level_compaction_stats.num_input_files_in_non_output_levels = 0;
-    output_level_compaction_stats.num_input_files_in_output_level = 1;
-    output_level_compaction_stats.num_input_records = total_input_key_count;
-    output_level_compaction_stats.num_dropped_records =
-        total_input_key_count - total_output_key_count;
-    output_level_compaction_stats.num_output_records = total_output_key_count;
-    output_level_compaction_stats.num_output_files = 1;
-    expect_stats[output_level].Add(output_level_compaction_stats);
-  }
-  VerifyCompactionStats(expect_stats, expect_pl_stats, output_level);
+  last_stats.Add(kBasicCompStats);
+  last_stats.Add(kBasicPerLevelStats);
+  last_stats.num_dropped_records = 0;
+  last_stats.bytes_read_non_output_levels = 0;
+  last_stats.num_input_files_in_non_output_levels = 0;
+  last_stats.bytes_read_output_level = kHasValue;
+  last_stats.num_input_files_in_output_level = kHasValue;
+  last_stats.ResetCompactionReason(CompactionReason::kManualCompaction);
+  VerifyCompactionStats(expect_stats, expect_pl_stats);
 
   // Add new data, which is all hot and overriding all existing data
   latest_cold_seq = dbfull()->GetLatestSequenceNumber();
@@ -1174,47 +1007,17 @@ TEST_F(TieredCompactionTest, SequenceBasedTieredStorageLevel) {
   ASSERT_GT(GetSstSizeHelper(Temperature::kUnknown), 0);
   ASSERT_EQ(GetSstSizeHelper(Temperature::kCold), 0);
 
-  uint64_t bytes_written_in_proximal_level =
-      GetPerKeyPlacementCompactionStats().bytes_written;
   for (int level = 2; level < kNumLevels - 1; level++) {
-    expect_stats[level].bytes_moved = bytes_written_in_proximal_level;
+    expect_stats[level].bytes_moved = kHasValue;
   }
 
-  // Another set of 130 keys + from the previous
-  total_input_key_count = total_output_key_count + 130;
-  // Merged into 130
-  total_output_key_count = 130;
-
-  {
-    InternalStats::CompactionStats output_level_compaction_stats(
-        CompactionReason::kManualCompaction, 1);
-    output_level_compaction_stats.cpu_micros = 1;
-    output_level_compaction_stats.micros = 1;
-    output_level_compaction_stats.bytes_written = 0;
-    output_level_compaction_stats.bytes_read_non_output_levels =
-        bytes_written_in_proximal_level;
-    output_level_compaction_stats.bytes_read_output_level =
-        bytes_written_output_level;
-    output_level_compaction_stats.num_input_files_in_non_output_levels = 1;
-    output_level_compaction_stats.num_input_files_in_output_level = 1;
-    output_level_compaction_stats.num_input_records = total_input_key_count;
-    output_level_compaction_stats.num_dropped_records =
-        total_input_key_count - total_output_key_count;
-    output_level_compaction_stats.num_output_records = 0;
-    output_level_compaction_stats.num_output_files = 0;
-    expect_stats[output_level].Add(output_level_compaction_stats);
-  }
-  {
-    InternalStats::CompactionStats proximal_level_compaction_stats(
-        CompactionReason::kManualCompaction, 1);
-    expect_pl_stats.cpu_micros = 1;
-    expect_pl_stats.micros = 1;
-    expect_pl_stats.bytes_written = bytes_written_in_proximal_level;
-    expect_pl_stats.num_output_files = 1;
-    expect_pl_stats.num_output_records = total_output_key_count;
-    expect_pl_stats.Add(proximal_level_compaction_stats);
-  }
-  VerifyCompactionStats(expect_stats, expect_pl_stats, output_level);
+  last_stats.Add(kBasicCompStats);
+  last_stats.bytes_read_output_level = kHasValue;
+  last_stats.num_input_files_in_output_level = kHasValue;
+  last_stats.ResetCompactionReason(CompactionReason::kManualCompaction);
+  expect_pl_stats.Add(kBasicPerKeyPlacementCompStats);
+  expect_pl_stats.ResetCompactionReason(CompactionReason::kManualCompaction);
+  VerifyCompactionStats(expect_stats, expect_pl_stats);
 
   // move forward the cold_seq, try to split the data into cold and hot, but in
   // this case it's unsafe to split the data
@@ -1336,13 +1139,7 @@ TEST_F(TieredCompactionTest, SequenceBasedTieredStorageLevel) {
   ASSERT_GT(GetSstSizeHelper(Temperature::kCold), 0);
 }
 
-// This test was essentially for a hacked-up version on future functionality.
-// It can be resurrected if/when a form of range-based tiering is properly
-// implemented.
-// FIXME: aside from that, this test reproduces a near-endless compaction
-// cycle that needs to be reproduced independently and fixed before
-// leveled compaction can be used with the preclude feature in production.
-TEST_F(TieredCompactionTest, DISABLED_RangeBasedTieredStorageLevel) {
+TEST_F(TieredCompactionTest, RangeBasedTieredStorageLevel) {
   const int kNumTrigger = 4;
   const int kNumLevels = 7;
   const int kNumKeys = 100;
@@ -1366,7 +1163,7 @@ TEST_F(TieredCompactionTest, DISABLED_RangeBasedTieredStorageLevel) {
       "CompactionIterator::PrepareOutput.context", [&](void* arg) {
         auto context = static_cast<PerKeyPlacementContext*>(arg);
         MutexLock l(&mutex);
-        context->output_to_proximal_level =
+        context->output_to_penultimate_level =
             cmp->Compare(context->key, hot_start) >= 0 &&
             cmp->Compare(context->key, hot_end) < 0;
       });
@@ -1449,11 +1246,8 @@ TEST_F(TieredCompactionTest, DISABLED_RangeBasedTieredStorageLevel) {
       options.statistics->getTickerCount(COMPACTION_RANGE_DEL_DROP_OBSOLETE),
       1);
 
-  // Tests that we only compact keys up to proximal level
-  // that are within proximal level input's internal key range.
-  // UPDATE: this functionality has changed. With proximal-enabled
-  // compaction, the expanded potential output range in the proximal
-  // level is reserved so should be safe to use.
+  // Tests that we only compact keys up to penultimate level
+  // that are within penultimate level input's internal key range.
   {
     MutexLock l(&mutex);
     hot_start = Key(0);
@@ -1462,6 +1256,7 @@ TEST_F(TieredCompactionTest, DISABLED_RangeBasedTieredStorageLevel) {
   const Snapshot* temp_snap = db_->GetSnapshot();
   // Key(0) and Key(1) here are inserted with higher sequence number
   // than Key(0) and Key(1) inserted above.
+  // Only Key(0) in last level will be compacted up, not Key(1).
   ASSERT_OK(Put(Key(0), "value" + std::to_string(0)));
   ASSERT_OK(Put(Key(1), "value" + std::to_string(100)));
   ASSERT_OK(db_->CompactRange(cro, nullptr, nullptr));
@@ -1471,17 +1266,14 @@ TEST_F(TieredCompactionTest, DISABLED_RangeBasedTieredStorageLevel) {
     db_->GetLiveFilesMetaData(&metas);
     for (const auto& f : metas) {
       if (f.temperature == Temperature::kUnknown) {
-        // UPDATED (was 3 entries, Key0..Key1)
-        ASSERT_EQ(f.num_entries, 52);
+        // Expect Key(0), Key(0), Key(1)
+        ASSERT_EQ(f.num_entries, 3);
         ASSERT_EQ(f.smallestkey, Key(0));
-        ASSERT_EQ(f.largestkey, Key(49));
+        ASSERT_EQ(f.largestkey, Key(1));
       } else {
         ASSERT_EQ(f.temperature, Temperature::kCold);
-        // UPDATED (was 50 entries, Key0..Key49)
-        // Key(100) is outside the hot range
-        ASSERT_EQ(f.num_entries, 1);
-        ASSERT_EQ(f.smallestkey, Key(100));
-        ASSERT_EQ(f.largestkey, Key(100));
+        // Key(2)-Key(49) and Key(100).
+        ASSERT_EQ(f.num_entries, 50);
       }
     }
   }
@@ -1522,6 +1314,8 @@ class PrecludeLastLevelTestBase : public DBTestBase {
       const std::unordered_map<std::string, std::string>& db_config_change) {
     if (dynamic) {
       if (config_change.size() > 0) {
+        // FIXME: temporary while preserve/preclude options are not user mutable
+        SaveAndRestore<bool> m(&TEST_allowSetOptionsImmutableInMutable, true);
         ASSERT_OK(db_->SetOptions(config_change));
       }
       if (db_config_change.size() > 0) {
@@ -1604,7 +1398,7 @@ TEST_P(PrecludeLastLevelTest, MigrationFromPreserveTimeManualCompaction) {
   cro.bottommost_level_compaction = BottommostLevelCompaction::kForce;
   ASSERT_OK(db_->CompactRange(cro, nullptr, nullptr));
 
-  // all data is moved up to the proximal level
+  // all data is moved up to the penultimate level
   ASSERT_EQ("0,0,0,0,0,1", FilesPerLevel());
   ASSERT_EQ(GetSstSizeHelper(Temperature::kCold), 0);
   ASSERT_GT(GetSstSizeHelper(Temperature::kUnknown), 0);
@@ -1676,7 +1470,7 @@ TEST_P(PrecludeLastLevelTest, MigrationFromPreserveTimeAutoCompaction) {
     ASSERT_OK(dbfull()->TEST_WaitForCompact());
   }
 
-  // all data is moved up to the proximal level
+  // all data is moved up to the penultimate level
   ASSERT_EQ("0,0,0,0,0,1", FilesPerLevel());
   ASSERT_EQ(GetSstSizeHelper(Temperature::kCold), 0);
   ASSERT_GT(GetSstSizeHelper(Temperature::kUnknown), 0);
@@ -1717,7 +1511,8 @@ TEST_P(PrecludeLastLevelTest, MigrationFromPreserveTimePartial) {
   ASSERT_EQ("0,0,0,0,0,0,1", FilesPerLevel());
 
   std::vector<KeyVersion> key_versions;
-  ASSERT_OK(GetAllKeyVersions(db_, {}, {}, std::numeric_limits<size_t>::max(),
+  ASSERT_OK(GetAllKeyVersions(db_, Slice(), Slice(),
+                              std::numeric_limits<size_t>::max(),
                               &key_versions));
 
   // make sure there're more than 300 keys and first 100 keys are having seqno
@@ -1764,10 +1559,7 @@ TEST_P(PrecludeLastLevelTest, SmallPrecludeTime) {
   options.env = mock_env_.get();
   options.level0_file_num_compaction_trigger = kNumTrigger;
   options.num_levels = kNumLevels;
-  // This existing test selected to also check the case of various temperatures
-  // for last_level_temperature, which should not be interesting enough to
-  // exercise across many/all test cases
-  options.last_level_temperature = RandomKnownTemperature();
+  options.last_level_temperature = Temperature::kCold;
   DestroyAndReopen(options);
 
   Random rnd(301);
@@ -1794,10 +1586,6 @@ TEST_P(PrecludeLastLevelTest, SmallPrecludeTime) {
   ASSERT_FALSE(tp_mapping.Empty());
   auto seqs = tp_mapping.TEST_GetInternalMapping();
   ASSERT_FALSE(seqs.empty());
-  ASSERT_GE(GetSstSizeHelper(Temperature::kUnknown), 1);
-  for (auto t : kKnownTemperatures) {
-    ASSERT_EQ(GetSstSizeHelper(t), 0);
-  }
 
   // Wait more than preclude_last_level time, then make sure all the data is
   // compacted to the last level even there's no write (no seqno -> time
@@ -1806,22 +1594,16 @@ TEST_P(PrecludeLastLevelTest, SmallPrecludeTime) {
 
   ASSERT_OK(db_->CompactRange(CompactRangeOptions(), nullptr, nullptr));
   ASSERT_EQ("0,0,0,0,0,0,1", FilesPerLevel());
-
-  for (auto t : kKnownTemperatures) {
-    if (t == options.last_level_temperature) {
-      ASSERT_GT(GetSstSizeHelper(t), 0);
-    } else {
-      ASSERT_EQ(GetSstSizeHelper(t), 0);
-    }
-  }
+  ASSERT_EQ(GetSstSizeHelper(Temperature::kUnknown), 0);
+  ASSERT_GT(GetSstSizeHelper(Temperature::kCold), 0);
 
   Close();
 }
 
 TEST_P(PrecludeLastLevelTest, CheckInternalKeyRange) {
-  // When compacting keys from the last level to proximal level,
-  // output to proximal level should be within internal key range
-  // of input files from proximal level.
+  // When compacting keys from the last level to penultimate level,
+  // output to penultimate level should be within internal key range
+  // of input files from penultimate level.
   // Set up:
   // L5:
   //  File 1: DeleteRange[1, 3)@4, File 2: [3@5, 100@6]
@@ -1869,8 +1651,7 @@ TEST_P(PrecludeLastLevelTest, CheckInternalKeyRange) {
 
   ASSERT_EQ("0,0,0,0,0,2,2", FilesPerLevel());
 
-  auto VerifyLogicalState = [&](int line) {
-    SCOPED_TRACE("Called from line " + std::to_string(line));
+  auto VerifyLogicalState = [&]() {
     // First with snapshot
     ASSERT_EQ("val2", Get(Key(2), snapshot));
     ASSERT_EQ("val3", Get(Key(3), snapshot));
@@ -1884,7 +1665,7 @@ TEST_P(PrecludeLastLevelTest, CheckInternalKeyRange) {
     ASSERT_EQ("val100", Get(Key(100)));
   };
 
-  VerifyLogicalState(__LINE__);
+  VerifyLogicalState();
 
   // Try to compact keys up
   CompactRangeOptions cro;
@@ -1895,40 +1676,24 @@ TEST_P(PrecludeLastLevelTest, CheckInternalKeyRange) {
   // type:1 vs. file #15 smallest key: '6B6579303030303033' seq:104, type:1
   ASSERT_OK(CompactRange(cro, Key(1), Key(2)));
 
-  VerifyLogicalState(__LINE__);
+  VerifyLogicalState();
 
   db_->ReleaseSnapshot(snapshot);
   Close();
 }
 
-INSTANTIATE_TEST_CASE_P(PrecludeLastLevelTest, PrecludeLastLevelTest,
-                        ::testing::Bool());
-
-class PrecludeWithCompactStyleTest : public PrecludeLastLevelTestBase,
-                                     public testing::WithParamInterface<bool> {
- public:
-  void ApplyConfigChange(
-      Options* options,
-      const std::unordered_map<std::string, std::string>& config_change,
-      const std::unordered_map<std::string, std::string>& db_config_change =
-          {}) {
-    // Depends on dynamic config change while holding a snapshot
-    ApplyConfigChangeImpl(true /*dynamic*/, options, config_change,
-                          db_config_change);
-  }
-};
-
-TEST_P(PrecludeWithCompactStyleTest, RangeTombstoneSnapshotMigrateFromLast) {
+TEST_P(PrecludeLastLevelTest, RangeTombstoneSnapshotMigrateFromLast) {
   // Reproducer for issue originally described in
   // https://github.com/facebook/rocksdb/pull/9964/files#r1024449523
-  const bool universal = GetParam();
+  if (!UseDynamicConfig()) {
+    // Depends on config change while holding a snapshot
+    return;
+  }
   const int kNumLevels = 7;
   auto options = CurrentOptions();
   options.env = mock_env_.get();
   options.last_level_temperature = Temperature::kCold;
-  options.compaction_style =
-      universal ? kCompactionStyleUniversal : kCompactionStyleLevel;
-  options.compaction_options_universal.allow_trivial_move = true;
+  options.level_compaction_dynamic_level_bytes = true;
   options.num_levels = kNumLevels;
   options.statistics = CreateDBStatistics();
   options.max_subcompactions = 10;
@@ -1948,19 +1713,13 @@ TEST_P(PrecludeWithCompactStyleTest, RangeTombstoneSnapshotMigrateFromLast) {
   ASSERT_OK(db_->DeleteRange({}, db_->DefaultColumnFamily(), Key(1), Key(5)));
   ASSERT_OK(Put(Key(1), "val1"));
   ASSERT_OK(Flush());
-
-  // Send to last level
-  if (universal) {
-    ASSERT_OK(CompactRange({}, {}, {}));
-  } else {
-    MoveFilesToLevel(6);
-  }
+  MoveFilesToLevel(6);
   ASSERT_EQ("0,0,0,0,0,0,1", FilesPerLevel());
 
   ApplyConfigChange(&options, {{"preclude_last_level_data_seconds", "10000"}});
 
-  // To exercise the WithinProximalLevelOutputRange feature, we want files
-  // around the middle file to be compacted on the proximal level
+  // To exercise the WithinPenultimateLevelOutputRange feature, we want files
+  // around the middle file to be compacted on the penultimate level
   ASSERT_OK(Put(Key(0), "val0"));
   ASSERT_OK(Flush());
   ASSERT_OK(Put(Key(3), "val3"));
@@ -1973,18 +1732,10 @@ TEST_P(PrecludeWithCompactStyleTest, RangeTombstoneSnapshotMigrateFromLast) {
       [&] { mock_clock_->MockSleepForSeconds(static_cast<int>(1000)); });
 
   ASSERT_OK(Flush());
-
-  // Send three files to next-to-last level (if explicitly needed)
-  if (universal) {
-    ASSERT_OK(dbfull()->TEST_WaitForCompact());
-  } else {
-    MoveFilesToLevel(5);
-  }
-
+  MoveFilesToLevel(5);
   ASSERT_EQ("0,0,0,0,0,3,1", FilesPerLevel());
 
-  auto VerifyLogicalState = [&](int line) {
-    SCOPED_TRACE("Called from line " + std::to_string(line));
+  auto VerifyLogicalState = [&]() {
     // First with snapshot
     if (snapshot) {
       ASSERT_EQ("NOT_FOUND", Get(Key(0), snapshot));
@@ -2004,31 +1755,24 @@ TEST_P(PrecludeWithCompactStyleTest, RangeTombstoneSnapshotMigrateFromLast) {
     ASSERT_EQ("val7", Get(Key(7)));
   };
 
-  VerifyLogicalState(__LINE__);
+  VerifyLogicalState();
 
   // Try a limited range compaction
-  // (These would previously hit "Unsafe to store Seq later than snapshot")
-  if (universal) {
-    uint64_t middle_l5 = GetLevelFileMetadatas(5)[1]->fd.GetNumber();
-    ASSERT_OK(db_->CompactFiles({}, {MakeTableFileName(middle_l5)}, 6));
-  } else {
-    ASSERT_OK(CompactRange({}, Key(3), Key(4)));
-  }
+  // FIXME: this currently hits the "Unsafe to store Seq later than snapshot"
+  // error. Needs to work safely for preclude option to be user mutable.
+  // ASSERT_OK(CompactRange({}, Key(3), Key(4)));
   EXPECT_EQ("0,0,0,0,0,3,1", FilesPerLevel());
-  VerifyLogicalState(__LINE__);
+  VerifyLogicalState();
 
-  // Compact everything, but some data still goes to both proximal and last
+  // Compact everything, but some data still goes to both penultimate and last
   // levels. A full-range compaction should be safe to "migrate" data from the
-  // last level to proximal (because of preclude setting change).
+  // last level to penultimate (because of preclude setting change).
   ASSERT_OK(CompactRange({}, {}, {}));
   EXPECT_EQ("0,0,0,0,0,1,1", FilesPerLevel());
-  VerifyLogicalState(__LINE__);
+  VerifyLogicalState();
   // Key1 should have been migrated out of the last level
-  // FIXME: doesn't yet work with leveled compaction
-  if (universal) {
-    auto& meta = *GetLevelFileMetadatas(6)[0];
-    ASSERT_LT(Key(1), meta.smallest.user_key().ToString());
-  }
+  auto& meta = *GetLevelFileMetadatas(6)[0];
+  ASSERT_LT(Key(1), meta.smallest.user_key().ToString());
 
   // Make data eligible for last level
   db_->ReleaseSnapshot(snapshot);
@@ -2037,13 +1781,13 @@ TEST_P(PrecludeWithCompactStyleTest, RangeTombstoneSnapshotMigrateFromLast) {
 
   ASSERT_OK(CompactRange({}, {}, {}));
   EXPECT_EQ("0,0,0,0,0,0,1", FilesPerLevel());
-  VerifyLogicalState(__LINE__);
+  VerifyLogicalState();
 
   Close();
 }
 
-INSTANTIATE_TEST_CASE_P(PrecludeWithCompactStyleTest,
-                        PrecludeWithCompactStyleTest, ::testing::Bool());
+INSTANTIATE_TEST_CASE_P(PrecludeLastLevelTest, PrecludeLastLevelTest,
+                        ::testing::Bool());
 
 class TimedPutPrecludeLastLevelTest
     : public PrecludeLastLevelTestBase,
@@ -2138,7 +1882,7 @@ TEST_P(TimedPutPrecludeLastLevelTest, InterleavedTimedPutAndPut) {
   Close();
 }
 
-TEST_P(TimedPutPrecludeLastLevelTest, PreserveTimedPutOnProximalLevel) {
+TEST_P(TimedPutPrecludeLastLevelTest, PreserveTimedPutOnPenultimateLevel) {
   Options options = CurrentOptions();
   options.compaction_style = kCompactionStyleUniversal;
   options.disable_auto_compactions = true;
@@ -2164,14 +1908,14 @@ TEST_P(TimedPutPrecludeLastLevelTest, PreserveTimedPutOnProximalLevel) {
   ASSERT_OK(TimedPut(0, Key(2), "v2", kMockStartTime - 1 * 24 * 60 * 60, wo));
   ASSERT_OK(Flush());
 
-  // Should still be in proximal level.
+  // Should still be in penultimate level.
   ASSERT_OK(db_->CompactRange(CompactRangeOptions(), nullptr, nullptr));
   ASSERT_EQ("0,0,0,0,0,1", FilesPerLevel());
   ASSERT_GT(GetSstSizeHelper(Temperature::kHot), 0);
   ASSERT_EQ(GetSstSizeHelper(Temperature::kCold), 0);
 
   // Wait one more day and release snapshot. Data's preferred seqno should be
-  // swapped in, but data should still stay in proximal level. SST file's
+  // swapped in, but data should still stay in penultimate level. SST file's
   // seqno to time mapping should continue to cover preferred seqno after
   // compaction.
   db_->ReleaseSnapshot(snap1);
@@ -2319,7 +2063,8 @@ TEST_P(PrecludeLastLevelTest, LastLevelOnlyCompactionPartial) {
   ASSERT_GT(GetSstSizeHelper(Temperature::kUnknown), 0);
 
   std::vector<KeyVersion> key_versions;
-  ASSERT_OK(GetAllKeyVersions(db_, {}, {}, std::numeric_limits<size_t>::max(),
+  ASSERT_OK(GetAllKeyVersions(db_, Slice(), Slice(),
+                              std::numeric_limits<size_t>::max(),
                               &key_versions));
 
   // make sure there're more than 300 keys and first 100 keys are having seqno
@@ -2492,13 +2237,13 @@ TEST_P(PrecludeLastLevelOptionalTest, LastLevelOnlyCompactionNoPreclude) {
   Close();
 }
 
-TEST_P(PrecludeLastLevelOptionalTest, PeriodicCompactionToProximalLevel) {
+TEST_P(PrecludeLastLevelOptionalTest, PeriodicCompactionToPenultimateLevel) {
   // Test the last level only periodic compaction should also be blocked by an
-  // ongoing compaction in proximal level if tiered compaction is enabled
+  // ongoing compaction in penultimate level if tiered compaction is enabled
   // otherwise, the periodic compaction should just run for the last level.
   const int kNumTrigger = 4;
   const int kNumLevels = 7;
-  const int kProximalLevel = kNumLevels - 2;
+  const int kPenultimateLevel = kNumLevels - 2;
   const int kKeyPerSec = 1;
   const int kNumKeys = 100;
 
@@ -2540,13 +2285,13 @@ TEST_P(PrecludeLastLevelOptionalTest, PeriodicCompactionToProximalLevel) {
   SyncPoint::GetInstance()->SetCallBack(
       "CompactionJob::ProcessKeyValueCompaction()::Processing", [&](void* arg) {
         auto compaction = static_cast<Compaction*>(arg);
-        if (compaction->output_level() == kProximalLevel) {
+        if (compaction->output_level() == kPenultimateLevel) {
           is_size_ratio_compaction_running = true;
           TEST_SYNC_POINT(
-              "PrecludeLastLevelTest::PeriodicCompactionToProximalLevel:"
+              "PrecludeLastLevelTest::PeriodicCompactionToPenultimateLevel:"
               "SizeRatioCompaction1");
           TEST_SYNC_POINT(
-              "PrecludeLastLevelTest::PeriodicCompactionToProximalLevel:"
+              "PrecludeLastLevelTest::PeriodicCompactionToPenultimateLevel:"
               "SizeRatioCompaction2");
           is_size_ratio_compaction_running = false;
         }
@@ -2568,17 +2313,17 @@ TEST_P(PrecludeLastLevelOptionalTest, PeriodicCompactionToProximalLevel) {
           verified_last_level_compaction = true;
         }
         TEST_SYNC_POINT(
-            "PrecludeLastLevelTest::PeriodicCompactionToProximalLevel:"
+            "PrecludeLastLevelTest::PeriodicCompactionToPenultimateLevel:"
             "AutoCompactionPicked");
       });
 
   SyncPoint::GetInstance()->LoadDependency({
-      {"PrecludeLastLevelTest::PeriodicCompactionToProximalLevel:"
+      {"PrecludeLastLevelTest::PeriodicCompactionToPenultimateLevel:"
        "SizeRatioCompaction1",
-       "PrecludeLastLevelTest::PeriodicCompactionToProximalLevel:DoneWrite"},
-      {"PrecludeLastLevelTest::PeriodicCompactionToProximalLevel:"
+       "PrecludeLastLevelTest::PeriodicCompactionToPenultimateLevel:DoneWrite"},
+      {"PrecludeLastLevelTest::PeriodicCompactionToPenultimateLevel:"
        "AutoCompactionPicked",
-       "PrecludeLastLevelTest::PeriodicCompactionToProximalLevel:"
+       "PrecludeLastLevelTest::PeriodicCompactionToPenultimateLevel:"
        "SizeRatioCompaction2"},
   });
 
@@ -2595,11 +2340,11 @@ TEST_P(PrecludeLastLevelOptionalTest, PeriodicCompactionToProximalLevel) {
   }
 
   TEST_SYNC_POINT(
-      "PrecludeLastLevelTest::PeriodicCompactionToProximalLevel:DoneWrite");
+      "PrecludeLastLevelTest::PeriodicCompactionToPenultimateLevel:DoneWrite");
 
   // wait for periodic compaction time and flush to trigger the periodic
   // compaction, which should be blocked by ongoing compaction in the
-  // proximal level
+  // penultimate level
   mock_clock_->MockSleepForSeconds(10000);
   for (int i = 0; i < 3 * kNumKeys; i++) {
     ASSERT_OK(Put(Key(i), rnd.RandomString(10)));
@@ -2662,7 +2407,7 @@ class ThreeRangesPartitionerFactory : public SstPartitionerFactory {
   }
 };
 
-TEST_P(PrecludeLastLevelTest, PartialProximalLevelCompaction) {
+TEST_P(PrecludeLastLevelTest, PartialPenultimateLevelCompaction) {
   const int kNumTrigger = 4;
   const int kNumLevels = 7;
   const int kKeyPerSec = 10;
@@ -2832,8 +2577,8 @@ TEST_P(PrecludeLastLevelTest, RangeDelsCauseFileEndpointsToOverlap) {
       "UniversalCompactionBuilder::PickCompaction:Return", [&](void* arg) {
         auto compaction = static_cast<Compaction*>(arg);
         if (compaction->SupportsPerKeyPlacement()) {
-          ASSERT_EQ(compaction->GetProximalOutputRangeType(),
-                    Compaction::ProximalOutputRangeType::kNonLastRange);
+          ASSERT_EQ(compaction->GetPenultimateOutputRangeType(),
+                    Compaction::PenultimateOutputRangeType::kNonLastRange);
           per_key_comp_num++;
         }
       });
@@ -2889,7 +2634,7 @@ TEST_P(PrecludeLastLevelTest, RangeDelsCauseFileEndpointsToOverlap) {
   ASSERT_EQ(3, per_key_comp_num);
   verify_db();
 
-  // Finish off the proximal level.
+  // Finish off the penultimate level.
   ASSERT_OK(db_->CompactRange(cro, nullptr, nullptr));
   ASSERT_EQ("0,0,0,0,0,0,3", FilesPerLevel());
   verify_db();

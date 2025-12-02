@@ -82,7 +82,8 @@ TEST_F(OptionsTest, GetOptionsFromMapTest) {
        "kLZ4Compression:"
        "kLZ4HCCompression:"
        "kXpressCompression:"
-       "kZSTD"},
+       "kZSTD:"
+       "kZSTDNotFinalCompression"},
       {"bottommost_compression", "kLZ4Compression"},
       {"bottommost_compression_opts", "5:6:7:8:10:true"},
       {"compression_opts", "4:5:6:7:8:2:true:100:false"},
@@ -145,7 +146,6 @@ TEST_F(OptionsTest, GetOptionsFromMapTest) {
       {"error_if_exists", "false"},
       {"paranoid_checks", "true"},
       {"track_and_verify_wals_in_manifest", "true"},
-      {"track_and_verify_wals", "true"},
       {"verify_sst_unique_id_in_manifest", "true"},
       {"max_open_files", "32"},
       {"max_total_wal_size", "33"},
@@ -160,7 +160,6 @@ TEST_F(OptionsTest, GetOptionsFromMapTest) {
       {"keep_log_file_num", "39"},
       {"recycle_log_file_num", "5"},
       {"max_manifest_file_size", "40"},
-      {"max_manifest_space_amp_pct", "42"},
       {"table_cache_numshardbits", "41"},
       {"WAL_ttl_seconds", "43"},
       {"WAL_size_limit_MB", "44"},
@@ -178,6 +177,7 @@ TEST_F(OptionsTest, GetOptionsFromMapTest) {
       {"advise_random_on_open", "true"},
       {"use_adaptive_mutex", "false"},
       {"compaction_readahead_size", "100"},
+      {"random_access_max_buffer_size", "3145728"},
       {"writable_file_max_buffer_size", "314159"},
       {"bytes_per_sync", "47"},
       {"wal_bytes_per_sync", "48"},
@@ -201,9 +201,10 @@ TEST_F(OptionsTest, GetOptionsFromMapTest) {
   ASSERT_EQ(new_cf_opt.write_buffer_size, 1U);
   ASSERT_EQ(new_cf_opt.max_write_buffer_number, 2);
   ASSERT_EQ(new_cf_opt.min_write_buffer_number_to_merge, 3);
+  ASSERT_EQ(new_cf_opt.max_write_buffer_number_to_maintain, 99);
   ASSERT_EQ(new_cf_opt.max_write_buffer_size_to_maintain, -99999);
   ASSERT_EQ(new_cf_opt.compression, kSnappyCompression);
-  ASSERT_EQ(new_cf_opt.compression_per_level.size(), 8U);
+  ASSERT_EQ(new_cf_opt.compression_per_level.size(), 9U);
   ASSERT_EQ(new_cf_opt.compression_per_level[0], kNoCompression);
   ASSERT_EQ(new_cf_opt.compression_per_level[1], kSnappyCompression);
   ASSERT_EQ(new_cf_opt.compression_per_level[2], kZlibCompression);
@@ -212,6 +213,7 @@ TEST_F(OptionsTest, GetOptionsFromMapTest) {
   ASSERT_EQ(new_cf_opt.compression_per_level[5], kLZ4HCCompression);
   ASSERT_EQ(new_cf_opt.compression_per_level[6], kXpressCompression);
   ASSERT_EQ(new_cf_opt.compression_per_level[7], kZSTD);
+  ASSERT_EQ(new_cf_opt.compression_per_level[8], kZSTDNotFinalCompression);
   ASSERT_EQ(new_cf_opt.compression_opts.window_bits, 4);
   ASSERT_EQ(new_cf_opt.compression_opts.level, 5);
   ASSERT_EQ(new_cf_opt.compression_opts.strategy, 6);
@@ -327,7 +329,6 @@ TEST_F(OptionsTest, GetOptionsFromMapTest) {
   ASSERT_EQ(new_db_opt.error_if_exists, false);
   ASSERT_EQ(new_db_opt.paranoid_checks, true);
   ASSERT_EQ(new_db_opt.track_and_verify_wals_in_manifest, true);
-  ASSERT_EQ(new_db_opt.track_and_verify_wals, true);
   ASSERT_EQ(new_db_opt.verify_sst_unique_id_in_manifest, true);
   ASSERT_EQ(new_db_opt.max_open_files, 32);
   ASSERT_EQ(new_db_opt.max_total_wal_size, static_cast<uint64_t>(33));
@@ -342,8 +343,7 @@ TEST_F(OptionsTest, GetOptionsFromMapTest) {
   ASSERT_EQ(new_db_opt.log_file_time_to_roll, 38U);
   ASSERT_EQ(new_db_opt.keep_log_file_num, 39U);
   ASSERT_EQ(new_db_opt.recycle_log_file_num, 5U);
-  ASSERT_EQ(new_db_opt.max_manifest_file_size, uint64_t{40});
-  ASSERT_EQ(new_db_opt.max_manifest_space_amp_pct, 42);
+  ASSERT_EQ(new_db_opt.max_manifest_file_size, static_cast<uint64_t>(40));
   ASSERT_EQ(new_db_opt.table_cache_numshardbits, 41);
   ASSERT_EQ(new_db_opt.WAL_ttl_seconds, static_cast<uint64_t>(43));
   ASSERT_EQ(new_db_opt.WAL_size_limit_MB, static_cast<uint64_t>(44));
@@ -360,6 +360,7 @@ TEST_F(OptionsTest, GetOptionsFromMapTest) {
   ASSERT_EQ(new_db_opt.advise_random_on_open, true);
   ASSERT_EQ(new_db_opt.use_adaptive_mutex, false);
   ASSERT_EQ(new_db_opt.compaction_readahead_size, 100);
+  ASSERT_EQ(new_db_opt.random_access_max_buffer_size, 3145728);
   ASSERT_EQ(new_db_opt.writable_file_max_buffer_size, 314159);
   ASSERT_EQ(new_db_opt.bytes_per_sync, static_cast<uint64_t>(47));
   ASSERT_EQ(new_db_opt.wal_bytes_per_sync, static_cast<uint64_t>(48));
@@ -900,7 +901,6 @@ TEST_F(OptionsTest, OldInterfaceTest) {
       {"error_if_exists", "false"},
       {"paranoid_checks", "true"},
       {"track_and_verify_wals_in_manifest", "true"},
-      {"track_and_verify_wals", "true"},
       {"verify_sst_unique_id_in_manifest", "true"},
       {"max_open_files", "32"},
       {"daily_offpeak_time_utc", "06:30-23:30"},
@@ -916,7 +916,6 @@ TEST_F(OptionsTest, OldInterfaceTest) {
   ASSERT_EQ(new_db_opt.error_if_exists, false);
   ASSERT_EQ(new_db_opt.paranoid_checks, true);
   ASSERT_EQ(new_db_opt.track_and_verify_wals_in_manifest, true);
-  ASSERT_EQ(new_db_opt.track_and_verify_wals, true);
   ASSERT_EQ(new_db_opt.verify_sst_unique_id_in_manifest, true);
   ASSERT_EQ(new_db_opt.max_open_files, 32);
   db_options_map["unknown_option"] = "1";
@@ -1722,31 +1721,15 @@ TEST_F(OptionsTest, MutableCFOptions) {
 
   ASSERT_OK(GetColumnFamilyOptionsFromString(
       config_options, cf_opts,
-      "paranoid_file_checks=true; "
-      "verify_output_flags=2049; "
-      "block_based_table_factory.block_align=false; "
-      "block_based_table_factory.super_block_alignment_size=65536; "
-      "block_based_table_factory.super_block_alignment_space_overhead_ratio="
-      "4096; "
+      "paranoid_file_checks=true; block_based_table_factory.block_align=false; "
       "block_based_table_factory.block_size=8192;",
       &cf_opts));
   ASSERT_TRUE(cf_opts.paranoid_file_checks);
-  ASSERT_NE(
-      (cf_opts.verify_output_flags & VerifyOutputFlags::kVerifyBlockChecksum),
-      VerifyOutputFlags::kVerifyNone);
-  ASSERT_NE((cf_opts.verify_output_flags &
-             VerifyOutputFlags::kEnableForRemoteCompaction),
-            VerifyOutputFlags::kVerifyNone);
-  ASSERT_EQ((cf_opts.verify_output_flags &
-             VerifyOutputFlags::kEnableForLocalCompaction),
-            VerifyOutputFlags::kVerifyNone);
   ASSERT_NE(cf_opts.table_factory.get(), nullptr);
   auto* bbto = cf_opts.table_factory->GetOptions<BlockBasedTableOptions>();
   ASSERT_NE(bbto, nullptr);
   ASSERT_EQ(bbto->block_size, 8192);
   ASSERT_EQ(bbto->block_align, false);
-  ASSERT_EQ(bbto->super_block_alignment_size, 65536);
-  ASSERT_EQ(bbto->super_block_alignment_space_overhead_ratio, 4096);
   std::unordered_map<std::string, std::string> unused_opts;
   ASSERT_OK(GetColumnFamilyOptionsFromMap(
       config_options, cf_opts, {{"paranoid_file_checks", "false"}}, &cf_opts));
@@ -2049,7 +2032,7 @@ TEST_F(OptionsTest, GetStringFromCompressionType) {
   ASSERT_EQ(res, "kZlibCompression");
 
   ASSERT_NOK(
-      GetStringFromCompressionType(&res, static_cast<CompressionType>(0x7F)));
+      GetStringFromCompressionType(&res, static_cast<CompressionType>(-10)));
 }
 
 TEST_F(OptionsTest, OnlyMutableDBOptions) {
@@ -2399,7 +2382,8 @@ TEST_F(OptionsOldApiTest, GetOptionsFromMapTest) {
        "kLZ4Compression:"
        "kLZ4HCCompression:"
        "kXpressCompression:"
-       "kZSTD"},
+       "kZSTD:"
+       "kZSTDNotFinalCompression"},
       {"bottommost_compression", "kLZ4Compression"},
       {"bottommost_compression_opts", "5:6:7:8:9:true"},
       {"compression_opts", "4:5:6:7:8:9:true:10:false"},
@@ -2466,7 +2450,6 @@ TEST_F(OptionsOldApiTest, GetOptionsFromMapTest) {
       {"error_if_exists", "false"},
       {"paranoid_checks", "true"},
       {"track_and_verify_wals_in_manifest", "true"},
-      {"track_and_verify_wals", "true"},
       {"verify_sst_unique_id_in_manifest", "true"},
       {"max_open_files", "32"},
       {"max_total_wal_size", "33"},
@@ -2481,7 +2464,6 @@ TEST_F(OptionsOldApiTest, GetOptionsFromMapTest) {
       {"keep_log_file_num", "39"},
       {"recycle_log_file_num", "5"},
       {"max_manifest_file_size", "40"},
-      {"max_manifest_space_amp_pct", "42"},
       {"table_cache_numshardbits", "41"},
       {"WAL_ttl_seconds", "43"},
       {"WAL_size_limit_MB", "44"},
@@ -2499,6 +2481,7 @@ TEST_F(OptionsOldApiTest, GetOptionsFromMapTest) {
       {"advise_random_on_open", "true"},
       {"use_adaptive_mutex", "false"},
       {"compaction_readahead_size", "100"},
+      {"random_access_max_buffer_size", "3145728"},
       {"writable_file_max_buffer_size", "314159"},
       {"bytes_per_sync", "47"},
       {"wal_bytes_per_sync", "48"},
@@ -2516,9 +2499,10 @@ TEST_F(OptionsOldApiTest, GetOptionsFromMapTest) {
   ASSERT_EQ(new_cf_opt.write_buffer_size, 1U);
   ASSERT_EQ(new_cf_opt.max_write_buffer_number, 2);
   ASSERT_EQ(new_cf_opt.min_write_buffer_number_to_merge, 3);
+  ASSERT_EQ(new_cf_opt.max_write_buffer_number_to_maintain, 99);
   ASSERT_EQ(new_cf_opt.max_write_buffer_size_to_maintain, -99999);
   ASSERT_EQ(new_cf_opt.compression, kSnappyCompression);
-  ASSERT_EQ(new_cf_opt.compression_per_level.size(), 8U);
+  ASSERT_EQ(new_cf_opt.compression_per_level.size(), 9U);
   ASSERT_EQ(new_cf_opt.compression_per_level[0], kNoCompression);
   ASSERT_EQ(new_cf_opt.compression_per_level[1], kSnappyCompression);
   ASSERT_EQ(new_cf_opt.compression_per_level[2], kZlibCompression);
@@ -2527,6 +2511,7 @@ TEST_F(OptionsOldApiTest, GetOptionsFromMapTest) {
   ASSERT_EQ(new_cf_opt.compression_per_level[5], kLZ4HCCompression);
   ASSERT_EQ(new_cf_opt.compression_per_level[6], kXpressCompression);
   ASSERT_EQ(new_cf_opt.compression_per_level[7], kZSTD);
+  ASSERT_EQ(new_cf_opt.compression_per_level[8], kZSTDNotFinalCompression);
   ASSERT_EQ(new_cf_opt.compression_opts.window_bits, 4);
   ASSERT_EQ(new_cf_opt.compression_opts.level, 5);
   ASSERT_EQ(new_cf_opt.compression_opts.strategy, 6);
@@ -2595,7 +2580,6 @@ TEST_F(OptionsOldApiTest, GetOptionsFromMapTest) {
   ASSERT_EQ(new_cf_opt.optimize_filters_for_hits, true);
   ASSERT_EQ(new_cf_opt.prefix_extractor->AsString(), "rocksdb.FixedPrefix.31");
   ASSERT_EQ(new_cf_opt.experimental_mempurge_threshold, 0.003);
-  ASSERT_EQ(new_cf_opt.verify_output_flags, VerifyOutputFlags::kVerifyNone);
   ASSERT_EQ(new_cf_opt.enable_blob_files, true);
   ASSERT_EQ(new_cf_opt.min_blob_size, 1ULL << 10);
   ASSERT_EQ(new_cf_opt.blob_file_size, 1ULL << 30);
@@ -2654,7 +2638,6 @@ TEST_F(OptionsOldApiTest, GetOptionsFromMapTest) {
   ASSERT_EQ(new_db_opt.error_if_exists, false);
   ASSERT_EQ(new_db_opt.paranoid_checks, true);
   ASSERT_EQ(new_db_opt.track_and_verify_wals_in_manifest, true);
-  ASSERT_EQ(new_db_opt.track_and_verify_wals, true);
   ASSERT_EQ(new_db_opt.max_open_files, 32);
   ASSERT_EQ(new_db_opt.max_total_wal_size, static_cast<uint64_t>(33));
   ASSERT_EQ(new_db_opt.use_fsync, true);
@@ -2668,8 +2651,7 @@ TEST_F(OptionsOldApiTest, GetOptionsFromMapTest) {
   ASSERT_EQ(new_db_opt.log_file_time_to_roll, 38U);
   ASSERT_EQ(new_db_opt.keep_log_file_num, 39U);
   ASSERT_EQ(new_db_opt.recycle_log_file_num, 5U);
-  ASSERT_EQ(new_db_opt.max_manifest_file_size, uint64_t{40});
-  ASSERT_EQ(new_db_opt.max_manifest_space_amp_pct, 42);
+  ASSERT_EQ(new_db_opt.max_manifest_file_size, static_cast<uint64_t>(40));
   ASSERT_EQ(new_db_opt.table_cache_numshardbits, 41);
   ASSERT_EQ(new_db_opt.WAL_ttl_seconds, static_cast<uint64_t>(43));
   ASSERT_EQ(new_db_opt.WAL_size_limit_MB, static_cast<uint64_t>(44));
@@ -2686,6 +2668,7 @@ TEST_F(OptionsOldApiTest, GetOptionsFromMapTest) {
   ASSERT_EQ(new_db_opt.advise_random_on_open, true);
   ASSERT_EQ(new_db_opt.use_adaptive_mutex, false);
   ASSERT_EQ(new_db_opt.compaction_readahead_size, 100);
+  ASSERT_EQ(new_db_opt.random_access_max_buffer_size, 3145728);
   ASSERT_EQ(new_db_opt.writable_file_max_buffer_size, 314159);
   ASSERT_EQ(new_db_opt.bytes_per_sync, static_cast<uint64_t>(47));
   ASSERT_EQ(new_db_opt.wal_bytes_per_sync, static_cast<uint64_t>(48));

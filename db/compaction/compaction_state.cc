@@ -36,11 +36,11 @@ Slice CompactionState::LargestUserKey() {
 }
 
 void CompactionState::AggregateCompactionStats(
-    InternalStats::CompactionStatsFull& internal_stats,
-    CompactionJobStats& job_stats) {
+    InternalStats::CompactionStatsFull& compaction_stats,
+    CompactionJobStats& compaction_job_stats) {
   for (const auto& sc : sub_compact_states) {
-    sc.AggregateCompactionOutputStats(internal_stats);
-    job_stats.Add(sc.compaction_job_stats);
+    sc.AggregateCompactionOutputStats(compaction_stats);
+    compaction_job_stats.Add(sc.compaction_job_stats);
   }
 }
 }  // namespace ROCKSDB_NAMESPACE

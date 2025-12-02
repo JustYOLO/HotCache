@@ -14,32 +14,22 @@
 
 namespace ROCKSDB_NAMESPACE {
 void SubcompactionState::AggregateCompactionOutputStats(
-    InternalStats::CompactionStatsFull& internal_stats) const {
-  // Outputs should be closed. By extension, any files created just for
-  // range deletes have already been written also.
-  assert(compaction_outputs_.HasBuilder() == false);
-  assert(proximal_level_outputs_.HasBuilder() == false);
-
-  // FIXME: These stats currently include abandonned output files
-  // assert(compaction_outputs_.stats_.num_output_files ==
-  //        compaction_outputs_.outputs_.size());
-  // assert(proximal_level_outputs_.stats_.num_output_files ==
-  //        proximal_level_outputs_.outputs_.size());
-
-  internal_stats.output_level_stats.Add(compaction_outputs_.stats_);
-  if (proximal_level_outputs_.HasOutput()) {
-    internal_stats.has_proximal_level_output = true;
-    internal_stats.proximal_level_stats.Add(proximal_level_outputs_.stats_);
+    InternalStats::CompactionStatsFull& compaction_stats) const {
+  compaction_stats.stats.Add(compaction_outputs_.stats_);
+  if (HasPenultimateLevelOutputs()) {
+    compaction_stats.has_penultimate_level_output = true;
+    compaction_stats.penultimate_level_stats.Add(
+        penultimate_level_outputs_.stats_);
   }
 }
 
 OutputIterator SubcompactionState::GetOutputs() const {
-  return OutputIterator(proximal_level_outputs_.outputs_,
+  return OutputIterator(penultimate_level_outputs_.outputs_,
                         compaction_outputs_.outputs_);
 }
 
 void SubcompactionState::Cleanup(Cache* cache) {
-  proximal_level_outputs_.Cleanup();
+  penultimate_level_outputs_.Cleanup();
   compaction_outputs_.Cleanup();
 
   if (!status.ok()) {
@@ -53,7 +43,7 @@ void SubcompactionState::Cleanup(Cache* cache) {
       // be picked up by scanning the DB directory.
       TableCache::ReleaseObsolete(
           cache, out.meta.fd.GetNumber(), nullptr /*handle*/,
-          compaction->mutable_cf_options().uncache_aggressiveness);
+          compaction->mutable_cf_options()->uncache_aggressiveness);
     }
   }
   // TODO: sub_compact.io_status is not checked like status. Not sure if thats
@@ -62,9 +52,9 @@ void SubcompactionState::Cleanup(Cache* cache) {
 }
 
 Slice SubcompactionState::SmallestUserKey() const {
-  if (proximal_level_outputs_.HasOutput()) {
+  if (has_penultimate_level_outputs_) {
     Slice a = compaction_outputs_.SmallestUserKey();
-    Slice b = proximal_level_outputs_.SmallestUserKey();
+    Slice b = penultimate_level_outputs_.SmallestUserKey();
     if (a.empty()) {
       return b;
     }
@@ -84,9 +74,9 @@ Slice SubcompactionState::SmallestUserKey() const {
 }
 
 Slice SubcompactionState::LargestUserKey() const {
-  if (proximal_level_outputs_.HasOutput()) {
+  if (has_penultimate_level_outputs_) {
     Slice a = compaction_outputs_.LargestUserKey();
-    Slice b = proximal_level_outputs_.LargestUserKey();
+    Slice b = penultimate_level_outputs_.LargestUserKey();
     if (a.empty()) {
       return b;
     }
@@ -106,15 +96,18 @@ Slice SubcompactionState::LargestUserKey() const {
 }
 
 Status SubcompactionState::AddToOutput(
-    const CompactionIterator& iter, bool use_proximal_output,
+    const CompactionIterator& iter,
     const CompactionFileOpenFunc& open_file_func,
-    const CompactionFileCloseFunc& close_file_func,
-    const ParsedInternalKey& prev_table_last_internal_key) {
-  // update target output
-  current_outputs_ =
-      use_proximal_output ? &proximal_level_outputs_ : &compaction_outputs_;
-  return current_outputs_->AddToOutput(iter, open_file_func, close_file_func,
-                                       prev_table_last_internal_key);
+    const CompactionFileCloseFunc& close_file_func) {
+  // update target output first
+  is_current_penultimate_level_ = iter.output_to_penultimate_level();
+  current_outputs_ = is_current_penultimate_level_ ? &penultimate_level_outputs_
+                                                   : &compaction_outputs_;
+  if (is_current_penultimate_level_) {
+    has_penultimate_level_outputs_ = true;
+  }
+
+  return Current().AddToOutput(iter, open_file_func, close_file_func);
 }
 
 }  // namespace ROCKSDB_NAMESPACE

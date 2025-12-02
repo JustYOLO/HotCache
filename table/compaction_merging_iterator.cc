@@ -5,8 +5,6 @@
 //  (found in the LICENSE.Apache file in the root directory).
 #include "table/compaction_merging_iterator.h"
 
-#include "db/internal_stats.h"
-
 namespace ROCKSDB_NAMESPACE {
 class CompactionMergingIterator : public InternalIterator {
  public:
@@ -15,15 +13,12 @@ class CompactionMergingIterator : public InternalIterator {
       int n, bool is_arena_mode,
       std::vector<std::pair<std::unique_ptr<TruncatedRangeDelIterator>,
                             std::unique_ptr<TruncatedRangeDelIterator>**>>&
-          range_tombstones,
-      InternalStats* internal_stats)
+          range_tombstones)
       : is_arena_mode_(is_arena_mode),
         comparator_(comparator),
         current_(nullptr),
         minHeap_(CompactionHeapItemComparator(comparator_)),
-        pinned_iters_mgr_(nullptr),
-        internal_stats_(internal_stats),
-        num_sorted_runs_recorded_(0) {
+        pinned_iters_mgr_(nullptr) {
     children_.resize(n);
     for (int i = 0; i < n; i++) {
       children_[i].level = i;
@@ -43,17 +38,6 @@ class CompactionMergingIterator : public InternalIterator {
       pinned_heap_item_[i].level = i;
       pinned_heap_item_[i].type = HeapItem::DELETE_RANGE_START;
     }
-    if (internal_stats_) {
-      TEST_SYNC_POINT("CompactionMergingIterator::UpdateInternalStats");
-      // The size of children_ or range_tombstone_iters_ (n) should not change
-      // but to be safe, we can record the size here so we decrement by the
-      // correct amount at destruction time
-      num_sorted_runs_recorded_ = n;
-      internal_stats_->IncrNumRunningCompactionSortedRuns(
-          num_sorted_runs_recorded_);
-      assert(num_sorted_runs_recorded_ <=
-             internal_stats_->NumRunningCompactionSortedRuns());
-    }
   }
 
   void considerStatus(const Status& s) {
@@ -63,14 +47,6 @@ class CompactionMergingIterator : public InternalIterator {
   }
 
   ~CompactionMergingIterator() override {
-    if (internal_stats_) {
-      assert(num_sorted_runs_recorded_ == range_tombstone_iters_.size());
-      assert(num_sorted_runs_recorded_ <=
-             internal_stats_->NumRunningCompactionSortedRuns());
-      internal_stats_->DecrNumRunningCompactionSortedRuns(
-          num_sorted_runs_recorded_);
-    }
-
     range_tombstone_iters_.clear();
 
     for (auto& child : children_) {
@@ -191,6 +167,13 @@ class CompactionMergingIterator : public InternalIterator {
 
     bool operator()(HeapItem* a, HeapItem* b) const {
       int r = comparator_->Compare(a->key(), b->key());
+      // For each file, we assume all range tombstone start keys come before
+      // its file boundary sentinel key (file's meta.largest key).
+      // In the case when meta.smallest = meta.largest and range tombstone start
+      // key is truncated at meta.smallest, the start key will have op_type =
+      // kMaxValid to make it smaller (see TruncatedRangeDelIterator
+      // constructor). The following assertion validates this assumption.
+      assert(a->type == b->type || r != 0);
       return r > 0;
     }
 
@@ -225,8 +208,6 @@ class CompactionMergingIterator : public InternalIterator {
   Status status_;
   CompactionMinHeap minHeap_;
   PinnedIteratorsManager* pinned_iters_mgr_;
-  InternalStats* internal_stats_;
-  uint64_t num_sorted_runs_recorded_;
   // Process a child that is not in the min heap.
   // If valid, add to the min heap. Otherwise, check status.
   void AddToMinHeapOrCheckStatus(HeapItem*);
@@ -235,24 +216,8 @@ class CompactionMergingIterator : public InternalIterator {
     return !minHeap_.empty() ? minHeap_.top() : nullptr;
   }
 
-  // For each file under a LevelIterator, the lifetime of range tombstone
-  // iterator is tied to the point key iterator. So we want scan through
-  // all range tombstone start keys before the file boundary sentinel key
-  // (file's meta.largest). When meta.smallest == meta.largest, the truncated
-  // range del start key may be ordered after meta.largest.
-  // Here we skip the first range deletion start key if it's truncated.
-  // This range deletion start key is redundant for compaction file cutting
-  // decision anyway, since the same point key will be considered for file
-  // cutting too.
-  void InsertNextValidRangeTombstoneAtLevel(size_t level) {
+  void InsertRangeTombstoneAtLevel(size_t level) {
     if (range_tombstone_iters_[level]->Valid()) {
-      if (range_tombstone_iters_[level]->start_key().type !=
-          kTypeRangeDeletion) {
-        range_tombstone_iters_[level]->Next();
-        if (!range_tombstone_iters_[level]->Valid()) {
-          return;
-        }
-      }
       pinned_heap_item_[level].SetTombstoneForCompaction(
           range_tombstone_iters_[level]->start_key());
       minHeap_.push(&pinned_heap_item_[level]);
@@ -271,7 +236,7 @@ void CompactionMergingIterator::SeekToFirst() {
   for (size_t i = 0; i < range_tombstone_iters_.size(); ++i) {
     if (range_tombstone_iters_[i]) {
       range_tombstone_iters_[i]->SeekToFirst();
-      InsertNextValidRangeTombstoneAtLevel(i);
+      InsertRangeTombstoneAtLevel(i);
     }
   }
 
@@ -299,7 +264,7 @@ void CompactionMergingIterator::Seek(const Slice& target) {
                  0) {
         range_tombstone_iters_[i]->Next();
       }
-      InsertNextValidRangeTombstoneAtLevel(i);
+      InsertRangeTombstoneAtLevel(i);
     }
   }
 
@@ -366,7 +331,7 @@ void CompactionMergingIterator::FindNextVisibleKey() {
       minHeap_.pop();
     }
     if (range_tombstone_iters_[current->level]) {
-      InsertNextValidRangeTombstoneAtLevel(current->level);
+      InsertRangeTombstoneAtLevel(current->level);
     }
   }
 }
@@ -385,7 +350,7 @@ InternalIterator* NewCompactionMergingIterator(
     std::vector<std::pair<std::unique_ptr<TruncatedRangeDelIterator>,
                           std::unique_ptr<TruncatedRangeDelIterator>**>>&
         range_tombstone_iters,
-    Arena* arena, InternalStats* stats) {
+    Arena* arena) {
   assert(n >= 0);
   if (n == 0) {
     return NewEmptyInternalIterator<Slice>(arena);
@@ -393,12 +358,12 @@ InternalIterator* NewCompactionMergingIterator(
     if (arena == nullptr) {
       return new CompactionMergingIterator(comparator, children, n,
                                            false /* is_arena_mode */,
-                                           range_tombstone_iters, stats);
+                                           range_tombstone_iters);
     } else {
       auto mem = arena->AllocateAligned(sizeof(CompactionMergingIterator));
       return new (mem) CompactionMergingIterator(comparator, children, n,
                                                  true /* is_arena_mode */,
-                                                 range_tombstone_iters, stats);
+                                                 range_tombstone_iters);
     }
   }
 }

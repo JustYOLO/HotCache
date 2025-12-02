@@ -68,7 +68,7 @@ class EnvMirror : public EnvWrapper {
     assert(as == bs);
     return as;
   }
-#if defined(_MSC_VER)  // ODR-SAFE
+#if defined(_MSC_VER)
 #pragma warning(push)
 // logical operation on address of string constant
 #pragma warning(disable : 4130)
@@ -87,7 +87,7 @@ class EnvMirror : public EnvWrapper {
     *r = ar;
     return as;
   }
-#if defined(_MSC_VER)  // ODR-SAFE
+#if defined(_MSC_VER)
 #pragma warning(pop)
 #endif
   Status DeleteFile(const std::string& f) override {

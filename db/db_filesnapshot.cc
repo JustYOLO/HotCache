@@ -75,9 +75,11 @@ Status DBImpl::GetLiveFiles(std::vector<std::string>& ret,
 
   ret.emplace_back(CurrentFileName(""));
   ret.emplace_back(DescriptorFileName("", versions_->manifest_file_number()));
-  // In read-only mode the OPTIONS file number is zero when no OPTIONS file
-  // exist at all. In this cases we do not record any OPTIONS file in the live
-  // file list.
+  // The OPTIONS file number is zero in read-write mode when OPTIONS file
+  // writing failed and the DB was configured with
+  // `fail_if_options_file_error == false`. In read-only mode the OPTIONS file
+  // number is zero when no OPTIONS file exist at all. In those cases we do not
+  // record any OPTIONS file in the live file list.
   if (versions_->options_file_number() != 0) {
     ret.emplace_back(OptionsFileName("", versions_->options_file_number()));
   }
@@ -109,7 +111,6 @@ Status DBImpl::GetSortedWalFilesImpl(VectorWalPtr& files, bool need_seqnos) {
   {
     InstrumentedMutexLock l(&mutex_);
     while (pending_purge_obsolete_files_ > 0 || bg_purge_scheduled_ > 0) {
-      TEST_SYNC_POINT("DBImpl::GetSortedWalFilesImpl:WaitPurge");
       bg_cv_.Wait();
     }
 
@@ -184,14 +185,14 @@ Status DBImpl::GetSortedWalFilesImpl(VectorWalPtr& files, bool need_seqnos) {
   return s;
 }
 
-Status DBImpl::GetCurrentWalFile(std::unique_ptr<WalFile>* current_wal_file) {
+Status DBImpl::GetCurrentWalFile(std::unique_ptr<WalFile>* current_log_file) {
   uint64_t current_logfile_number;
   {
     InstrumentedMutexLock l(&mutex_);
-    current_logfile_number = cur_wal_number_;
+    current_logfile_number = logfile_number_;
   }
 
-  return wal_manager_.GetLiveWalFile(current_logfile_number, current_wal_file);
+  return wal_manager_.GetLiveWalFile(current_logfile_number, current_log_file);
 }
 
 Status DBImpl::GetLiveFilesStorageInfo(
@@ -264,7 +265,7 @@ Status DBImpl::GetLiveFilesStorageInfo(
       continue;
     }
     VersionStorageInfo& vsi = *cfd->current()->storage_info();
-    auto& cf_paths = cfd->ioptions().cf_paths;
+    auto& cf_paths = cfd->ioptions()->cf_paths;
 
     auto GetDir = [&](size_t path_id) {
       // Matching TableFileName() behavior
@@ -331,7 +332,7 @@ Status DBImpl::GetLiveFilesStorageInfo(
   const uint64_t options_size = versions_->options_file_size_;
   const uint64_t min_log_num = MinLogNumberToKeep();
   // Ensure consistency with manifest for track_and_verify_wals_in_manifest
-  const uint64_t max_log_num = cur_wal_number_;
+  const uint64_t max_log_num = logfile_number_;
 
   mutex_.Unlock();
 
@@ -368,9 +369,11 @@ Status DBImpl::GetLiveFilesStorageInfo(
     }
   }
 
-  // In read-only mode the OPTIONS file number is zero when no OPTIONS file
-  // exist at all. In this cases we do not record any OPTIONS file in the live
-  // file list.
+  // The OPTIONS file number is zero in read-write mode when OPTIONS file
+  // writing failed and the DB was configured with
+  // `fail_if_options_file_error == false`. In read-only mode the OPTIONS file
+  // number is zero when no OPTIONS file exist at all. In those cases we do not
+  // record any OPTIONS file in the live file list.
   if (options_number != 0) {
     results.emplace_back();
     LiveFileStorageInfo& info = results.back();

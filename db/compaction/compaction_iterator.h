@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cinttypes>
+#include <cstdint>
 #include <deque>
 #include <string>
 #include <unordered_set>
@@ -117,6 +118,10 @@ class CompactionIterator {
     virtual const Compaction* real_compaction() const = 0;
 
     virtual bool SupportsPerKeyPlacement() const = 0;
+
+    // `key` includes timestamp if user-defined timestamp is enabled.
+    virtual bool WithinPenultimateLevelOutputRange(
+        const ParsedInternalKey&) const = 0;
   };
 
   class RealCompaction : public CompactionProxy {
@@ -124,6 +129,8 @@ class CompactionIterator {
     explicit RealCompaction(const Compaction* compaction)
         : compaction_(compaction) {
       assert(compaction_);
+      assert(compaction_->immutable_options());
+      assert(compaction_->mutable_cf_options());
     }
 
     int level() const override { return compaction_->level(); }
@@ -145,12 +152,11 @@ class CompactionIterator {
     }
 
     bool allow_ingest_behind() const override {
-      return compaction_->immutable_options().cf_allow_ingest_behind ||
-             compaction_->immutable_options().allow_ingest_behind;
+      return compaction_->immutable_options()->allow_ingest_behind;
     }
 
     bool allow_mmap_reads() const override {
-      return compaction_->immutable_options().allow_mmap_reads;
+      return compaction_->immutable_options()->allow_mmap_reads;
     }
 
     bool enable_blob_garbage_collection() const override {
@@ -162,7 +168,7 @@ class CompactionIterator {
     }
 
     uint64_t blob_compaction_readahead_size() const override {
-      return compaction_->mutable_cf_options().blob_compaction_readahead_size;
+      return compaction_->mutable_cf_options()->blob_compaction_readahead_size;
     }
 
     const Version* input_version() const override {
@@ -179,31 +185,29 @@ class CompactionIterator {
       return compaction_->SupportsPerKeyPlacement();
     }
 
+    // Check if key is within penultimate level output range, to see if it's
+    // safe to output to the penultimate level for per_key_placement feature.
+    // `key` includes timestamp if user-defined timestamp is enabled.
+    bool WithinPenultimateLevelOutputRange(
+        const ParsedInternalKey& ikey) const override {
+      return compaction_->WithinPenultimateLevelOutputRange(ikey);
+    }
+
    private:
     const Compaction* compaction_;
   };
 
-  // @param must_count_input_entries Controls input entry counting accuracy vs
-  // performance:
-  //   - If true: `NumInputEntryScanned()` always returns the exact count of
-  //   input keys
-  //     scanned. The iterator will use sequential `Next()` calls instead of
-  //     `Seek()` to maintain count accuracy as `Seek()` will not count the
-  //     skipped input entries, which is slower but guarantees correctness.
-  //   - If false: `NumInputEntryScanned()` returns the count only if no
-  //   `Seek()` operations
-  //     were performed on the input iterator. When compaction filters request
-  //     skipping ranges of keys or other optimizations trigger seek operations,
-  //     the count becomes unreliable. Always call `HasNumInputEntryScanned()`
-  //     first to verify if the count is accurate before using
-  //     `NumInputEntryScanned()`.
+  // @param must_count_input_entries  if true, `NumInputEntryScanned()` will
+  // return the number of input keys scanned. If false, `NumInputEntryScanned()`
+  // will return this number if no Seek was called on `input`. User should call
+  // `HasNumInputEntryScanned()` first in this case.
   CompactionIterator(
       InternalIterator* input, const Comparator* cmp, MergeHelper* merge_helper,
       SequenceNumber last_sequence, std::vector<SequenceNumber>* snapshots,
       SequenceNumber earliest_snapshot,
       SequenceNumber earliest_write_conflict_snapshot,
       SequenceNumber job_snapshot, const SnapshotChecker* snapshot_checker,
-      Env* env, bool report_detailed_time,
+      Env* env, bool report_detailed_time, bool expect_valid_internal_key,
       CompactionRangeDelAggregator* range_del_agg,
       BlobFileBuilder* blob_file_builder, bool allow_data_in_errors,
       bool enforce_single_del_contracts,
@@ -213,29 +217,29 @@ class CompactionIterator {
       const std::atomic<bool>* shutting_down = nullptr,
       const std::shared_ptr<Logger> info_log = nullptr,
       const std::string* full_history_ts_low = nullptr,
-      std::optional<SequenceNumber> preserve_seqno_min = {});
+      const SequenceNumber preserve_time_min_seqno = kMaxSequenceNumber,
+      const SequenceNumber preclude_last_level_min_seqno = kMaxSequenceNumber);
 
   // Constructor with custom CompactionProxy, used for tests.
-  CompactionIterator(InternalIterator* input, const Comparator* cmp,
-                     MergeHelper* merge_helper, SequenceNumber last_sequence,
-                     std::vector<SequenceNumber>* snapshots,
-                     SequenceNumber earliest_snapshot,
-                     SequenceNumber earliest_write_conflict_snapshot,
-                     SequenceNumber job_snapshot,
-                     const SnapshotChecker* snapshot_checker, Env* env,
-                     bool report_detailed_time,
-                     CompactionRangeDelAggregator* range_del_agg,
-                     BlobFileBuilder* blob_file_builder,
-                     bool allow_data_in_errors,
-                     bool enforce_single_del_contracts,
-                     const std::atomic<bool>& manual_compaction_canceled,
-                     std::unique_ptr<CompactionProxy> compaction,
-                     bool must_count_input_entries,
-                     const CompactionFilter* compaction_filter = nullptr,
-                     const std::atomic<bool>* shutting_down = nullptr,
-                     const std::shared_ptr<Logger> info_log = nullptr,
-                     const std::string* full_history_ts_low = nullptr,
-                     std::optional<SequenceNumber> preserve_seqno_min = {});
+  CompactionIterator(
+      InternalIterator* input, const Comparator* cmp, MergeHelper* merge_helper,
+      SequenceNumber last_sequence, std::vector<SequenceNumber>* snapshots,
+      SequenceNumber earliest_snapshot,
+      SequenceNumber earliest_write_conflict_snapshot,
+      SequenceNumber job_snapshot, const SnapshotChecker* snapshot_checker,
+      Env* env, bool report_detailed_time, bool expect_valid_internal_key,
+      CompactionRangeDelAggregator* range_del_agg,
+      BlobFileBuilder* blob_file_builder, bool allow_data_in_errors,
+      bool enforce_single_del_contracts,
+      const std::atomic<bool>& manual_compaction_canceled,
+      std::unique_ptr<CompactionProxy> compaction,
+      bool must_count_input_entries,
+      const CompactionFilter* compaction_filter = nullptr,
+      const std::atomic<bool>* shutting_down = nullptr,
+      const std::shared_ptr<Logger> info_log = nullptr,
+      const std::string* full_history_ts_low = nullptr,
+      const SequenceNumber preserve_time_min_seqno = kMaxSequenceNumber,
+      const SequenceNumber preclude_last_level_min_seqno = kMaxSequenceNumber);
 
   ~CompactionIterator();
 
@@ -265,21 +269,12 @@ class CompactionIterator {
   }
   const CompactionIterationStats& iter_stats() const { return iter_stats_; }
   bool HasNumInputEntryScanned() const { return input_.HasNumItered(); }
-
-  // This method should only be used when `HasNumInputEntryScanned()` returns
-  // true, unless `must_count_input_entries=true` was specified during iterator
-  // creation (which ensures the count is always accurate).
   uint64_t NumInputEntryScanned() const { return input_.NumItered(); }
-
-  // Returns true if the current valid key was already scanned/counted during
-  // a lookahead operation in a previous iteration.
-  //
-  // REQUIRED: Valid() must be true
-  bool IsCurrentKeyAlreadyScanned() const {
-    assert(Valid());
-    return at_next_ || merge_out_iter_.Valid();
+  // If the current key should be placed on penultimate level, only valid if
+  // per_key_placement is supported
+  bool output_to_penultimate_level() const {
+    return output_to_penultimate_level_;
   }
-
   Status InputStatus() const { return input_.status(); }
 
   bool IsDeleteRangeSentinelKey() const { return is_range_del_; }
@@ -290,6 +285,10 @@ class CompactionIterator {
 
   // Do final preparations before presenting the output to the callee.
   void PrepareOutput();
+
+  // Decide the current key should be output to the last level or penultimate
+  // level, only call for compaction supports per key placement
+  void DecideOutputLevel();
 
   // Passes the output value to the blob file builder (if any), and replaces it
   // with the corresponding blob reference if it has been actually written to a
@@ -372,6 +371,7 @@ class CompactionIterator {
   Env* env_;
   SystemClock* clock_;
   const bool report_detailed_time_;
+  const bool expect_valid_internal_key_;
   CompactionRangeDelAggregator* range_del_agg_;
   BlobFileBuilder* blob_file_builder_;
   std::unique_ptr<CompactionProxy> compaction_;
@@ -441,15 +441,23 @@ class CompactionIterator {
   // NextFromInput()).
   ParsedInternalKey ikey_;
 
-  // Stores whether current_user_key_ is valid. If so, current_user_key_
-  // stores the user key of the last key seen by the iterator.
-  // If false, treat the next key to read as a new user key.
+  // When a kTypeValuePreferredSeqno entry's preferred seqno is safely swapped
+  // in in this compaction, this field saves its original sequence number for
+  // range checking whether it's safe to be placed on the penultimate level.
+  // This is to ensure when such an entry happens to be the right boundary of
+  // penultimate safe range, it won't get excluded because with the preferred
+  // seqno swapped in, it's now larger than the right boundary (itself before
+  // the swap). This is safe to do, because preferred seqno is swapped in only
+  // when no entries with the same user key exist on lower levels and this entry
+  // is already visible in the earliest snapshot.
+  std::optional<SequenceNumber> saved_seq_for_penul_check_ = kMaxSequenceNumber;
+  // Stores whether ikey_.user_key is valid. If set to false, the user key is
+  // not compared against the current key in the underlying iterator.
   bool has_current_user_key_ = false;
   // If false, the iterator holds a copy of the current compaction iterator
   // output (or current key in the underlying iterator during NextFromInput()).
   bool at_next_ = false;
 
-  // A copy of the current internal key.
   IterKey current_key_;
   Slice current_user_key_;
   std::string curr_ts_;
@@ -459,9 +467,8 @@ class CompactionIterator {
   // True if the iterator has already returned a record for the current key.
   bool has_outputted_key_ = false;
 
-  // Truncate the value of the next key and output it without applying any
-  // compaction rules. This is an optimization for outputting a put after
-  // a single delete. See more in `NextFromInput()` under Optimization 3.
+  // truncated the value of the next key and output it without applying any
+  // compaction rules.  This is used for outputting a put after a single delete.
   bool clear_and_output_next_key_ = false;
 
   MergeOutputIterator merge_out_iter_;
@@ -487,6 +494,7 @@ class CompactionIterator {
   // is in or beyond the last file checked during the previous call
   std::vector<size_t> level_ptrs_;
   CompactionIterationStats iter_stats_;
+  uint64_t current_user_key_count_ = 0;
 
   // Used to avoid purging uncommitted values. The application can specify
   // uncommitted values by providing a SnapshotChecker object.
@@ -501,8 +509,17 @@ class CompactionIterator {
   // just been zeroed out during bottommost compaction.
   bool last_key_seq_zeroed_{false};
 
-  // Max seqno that can be zeroed out at last level (various reasons)
-  const SequenceNumber preserve_seqno_after_ = kMaxSequenceNumber;
+  // True if the current key should be output to the penultimate level if
+  // possible, compaction logic makes the final decision on which level to
+  // output to.
+  bool output_to_penultimate_level_{false};
+
+  // min seqno for preserving the time information.
+  const SequenceNumber preserve_time_min_seqno_ = kMaxSequenceNumber;
+
+  // min seqno to preclude the data from the last level, if the key seqno larger
+  // than this, it will be output to penultimate level
+  const SequenceNumber preclude_last_level_min_seqno_ = kMaxSequenceNumber;
 
   void AdvanceInputIter() { input_.Next(); }
 

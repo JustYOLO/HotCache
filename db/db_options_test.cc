@@ -70,8 +70,7 @@ class DBOptionsTest : public DBTestBase {
     options.env = env_;
     ImmutableDBOptions db_options(options);
     test::RandomInitCFOptions(&options, options, rnd);
-    auto sanitized_options =
-        SanitizeCfOptions(db_options, /*read_only*/ false, options);
+    auto sanitized_options = SanitizeOptions(db_options, options);
     auto opt_map = GetMutableCFOptionsMap(sanitized_options);
     delete options.compaction_filter;
     return opt_map;
@@ -322,26 +321,31 @@ TEST_F(DBOptionsTest, SetWithCustomMemTableFactory) {
   }
   Options options;
   options.create_if_missing = true;
-  options.env = env_;
-  options.disable_auto_compactions = false;
+  // Try with fail_if_options_file_error=false/true to update the options
+  for (bool on_error : {false, true}) {
+    options.fail_if_options_file_error = on_error;
+    options.env = env_;
+    options.disable_auto_compactions = false;
 
-  options.memtable_factory.reset(new DummySkipListFactory());
-  Reopen(options);
+    options.memtable_factory.reset(new DummySkipListFactory());
+    Reopen(options);
 
-  ColumnFamilyHandle* cfh = dbfull()->DefaultColumnFamily();
-  ASSERT_OK(dbfull()->SetOptions(cfh, {{"disable_auto_compactions", "true"}}));
-  ColumnFamilyDescriptor cfd;
-  ASSERT_OK(cfh->GetDescriptor(&cfd));
-  ASSERT_STREQ(cfd.options.memtable_factory->Name(),
-               DummySkipListFactory::kClassName());
-  ColumnFamilyHandle* test = nullptr;
-  ASSERT_OK(dbfull()->CreateColumnFamily(options, "test", &test));
-  ASSERT_OK(test->GetDescriptor(&cfd));
-  ASSERT_STREQ(cfd.options.memtable_factory->Name(),
-               DummySkipListFactory::kClassName());
+    ColumnFamilyHandle* cfh = dbfull()->DefaultColumnFamily();
+    ASSERT_OK(
+        dbfull()->SetOptions(cfh, {{"disable_auto_compactions", "true"}}));
+    ColumnFamilyDescriptor cfd;
+    ASSERT_OK(cfh->GetDescriptor(&cfd));
+    ASSERT_STREQ(cfd.options.memtable_factory->Name(),
+                 DummySkipListFactory::kClassName());
+    ColumnFamilyHandle* test = nullptr;
+    ASSERT_OK(dbfull()->CreateColumnFamily(options, "test", &test));
+    ASSERT_OK(test->GetDescriptor(&cfd));
+    ASSERT_STREQ(cfd.options.memtable_factory->Name(),
+                 DummySkipListFactory::kClassName());
 
-  ASSERT_OK(dbfull()->DropColumnFamily(test));
-  delete test;
+    ASSERT_OK(dbfull()->DropColumnFamily(test));
+    delete test;
+  }
 }
 
 TEST_F(DBOptionsTest, SetBytesPerSync) {
@@ -432,47 +436,12 @@ TEST_F(DBOptionsTest, SetWalBytesPerSync) {
   ASSERT_GT(low_bytes_per_sync, counter);
 }
 
-TEST_F(DBOptionsTest, MutableManifestOptions) {
-  // These aren't end-to-end tests, but sufficient to ensure the VersionSet
-  // receives the updates with SetDBOptions
-  for (int64_t i : {0, 1, 100, 100000, 10000000}) {
-    ASSERT_OK(
-        db_->SetDBOptions({{"max_manifest_file_size", std::to_string(i)}}));
-    ASSERT_EQ(i,
-              static_cast<int64_t>(db_->GetDBOptions().max_manifest_file_size));
-    ASSERT_EQ(i,
-              static_cast<int64_t>(
-                  dbfull()->GetVersionSet()->TEST_GetMinMaxManifestFileSize()));
-    if (i > 1) {
-      ++i;
-    }
-    ASSERT_OK(
-        db_->SetDBOptions({{"max_manifest_space_amp_pct", std::to_string(i)}}));
-    ASSERT_EQ(i, static_cast<int64_t>(
-                     db_->GetDBOptions().max_manifest_space_amp_pct));
-    ASSERT_EQ(i,
-              static_cast<int64_t>(
-                  dbfull()->GetVersionSet()->TEST_GetMaxManifestSpaceAmpPct()));
-    if (i > 1) {
-      ++i;
-    }
-    ASSERT_OK(db_->SetDBOptions(
-        {{"manifest_preallocation_size", std::to_string(i)}}));
-    ASSERT_EQ(i, static_cast<int64_t>(
-                     db_->GetDBOptions().manifest_preallocation_size));
-    ASSERT_EQ(
-        i, static_cast<int64_t>(
-               dbfull()->GetVersionSet()->TEST_GetManifestPreallocationSize()));
-  }
-}
-
 TEST_F(DBOptionsTest, WritableFileMaxBufferSize) {
   Options options;
   options.create_if_missing = true;
   options.writable_file_max_buffer_size = 1024 * 1024;
   options.level0_file_num_compaction_trigger = 3;
   options.max_manifest_file_size = 1;
-  options.max_manifest_space_amp_pct = 0;
   options.env = env_;
   int buffer_size = 1024 * 1024;
   Reopen(options);
@@ -1624,69 +1593,6 @@ TEST_F(DBOptionsTest, TempOptionsFailTest) {
     }
   }
   ASSERT_FALSE(found_temp_file);
-}
-
-TEST_F(DBOptionsTest, SetOptionsNoManifestWrite) {
-  ASSERT_OK(Put("x", "x"));
-  ASSERT_OK(Flush());
-
-  // In addition to checking manifest file, we want to ensure that SetOptions
-  // is essentially atomic, without releasing the DB mutex between applying
-  // the options to the cfd and installing new Version and SuperVersion. We
-  // probabilistically verify that by attempting to catch an inconsistency.
-  auto* const cfd =
-      static_cast<ColumnFamilyHandleImpl*>(db_->DefaultColumnFamily())->cfd();
-  SyncPoint::GetInstance()->DisableProcessing();
-  SyncPoint::GetInstance()->ClearAllCallBacks();
-  std::optional<std::thread> t;
-  SyncPoint::GetInstance()->SetCallBack(
-      "VersionSet::LogAndApply:WakeUpAndNotDone", [&](void* arg) {
-        auto* mu = static_cast<InstrumentedMutex*>(arg);
-        // Option not yet modified
-        ASSERT_FALSE(cfd->GetLatestMutableCFOptions().disable_auto_compactions);
-        ASSERT_FALSE(
-            cfd->current()->GetMutableCFOptions().disable_auto_compactions);
-        ASSERT_FALSE(
-            cfd->GetCurrentMutableCFOptions().disable_auto_compactions);
-        t = std::thread([mu, cfd]() {
-          InstrumentedMutexLock l(mu);
-          // Assuming above correctness, we can only acquire the mutex after
-          // options fully installed.
-          ASSERT_TRUE(
-              cfd->GetLatestMutableCFOptions().disable_auto_compactions);
-          ASSERT_TRUE(
-              cfd->current()->GetMutableCFOptions().disable_auto_compactions);
-          ASSERT_TRUE(
-              cfd->GetCurrentMutableCFOptions().disable_auto_compactions);
-        });
-      });
-  SyncPoint::GetInstance()->EnableProcessing();
-
-  // Baseline manifest file info
-  std::vector<std::string> live_files;
-  uint64_t orig_manifest_file_size;
-  ASSERT_OK(dbfull()->GetLiveFiles(live_files, &orig_manifest_file_size));
-  uint64_t orig_manifest_file_num = dbfull()->TEST_Current_Manifest_FileNo();
-
-  // Although this test mostly concerns SetOptions, we also include SetDBOptions
-  // just for the added scope
-  ASSERT_OK(db_->SetDBOptions({{"max_open_files", "100"}}));
-  ASSERT_OK(db_->SetOptions({{"disable_auto_compactions", "true"}}));
-
-  // Verify that our above check was activated and completed
-  ASSERT_TRUE(t.has_value());
-  t->join();
-  SyncPoint::GetInstance()->DisableProcessing();
-  SyncPoint::GetInstance()->ClearAllCallBacks();
-
-  // Verify manifest was not written to
-  uint64_t new_manifest_file_size;
-  ASSERT_OK(dbfull()->GetLiveFiles(live_files, &new_manifest_file_size));
-  uint64_t new_manifest_file_num = dbfull()->TEST_Current_Manifest_FileNo();
-  ASSERT_EQ(orig_manifest_file_num, new_manifest_file_num);
-  ASSERT_EQ(orig_manifest_file_size, new_manifest_file_size);
-
-  ASSERT_EQ(Get("x"), "x");
 }
 
 }  // namespace ROCKSDB_NAMESPACE

@@ -21,7 +21,6 @@ enum class PeriodicTaskType : uint8_t {
   kPersistStats,
   kFlushInfoLog,
   kRecordSeqnoTime,
-  kTriggerCompaction,
   kMax,
 };
 
@@ -43,16 +42,13 @@ class PeriodicTaskScheduler {
   PeriodicTaskScheduler& operator=(PeriodicTaskScheduler&&) = delete;
 
   // Register a task with its default repeat period. Thread safe call.
-  // @param run_immediately If true, the task will run soon after it's
-  // scheduled, instead of waiting for the repeat period.
-  Status Register(PeriodicTaskType task_type, const PeriodicTaskFunc& fn,
-                  bool run_immediately);
+  Status Register(PeriodicTaskType task_type, const PeriodicTaskFunc& fn);
 
   // Register a task with specified repeat period. 0 is an invalid argument
   // (kInvalidPeriodSec). To stop the task, please use Unregister().
   // Thread safe call.
   Status Register(PeriodicTaskType task_type, const PeriodicTaskFunc& fn,
-                  uint64_t repeat_period_seconds, bool run_immediately);
+                  uint64_t repeat_period_seconds);
 
   // Unregister the task. Thread safe call.
   Status Unregister(PeriodicTaskType task_type);

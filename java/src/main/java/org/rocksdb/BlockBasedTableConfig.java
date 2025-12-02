@@ -40,8 +40,6 @@ public class BlockBasedTableConfig extends TableFormatConfig {
     formatVersion = 6;
     enableIndexCompression = true;
     blockAlign = false;
-    superBlockAlignmentSize = 0;
-    superBlockAlignmentSpaceOverheadRatio = 128;
     indexShortening = IndexShorteningMode.kShortenSeparators;
 
     // NOTE: ONLY used if blockCache == null
@@ -62,9 +60,8 @@ public class BlockBasedTableConfig extends TableFormatConfig {
       final boolean partitionFilters, final boolean optimizeFiltersForMemory,
       final boolean useDeltaEncoding, final boolean wholeKeyFiltering,
       final boolean verifyCompression, final int readAmpBytesPerBit, final int formatVersion,
-      final boolean enableIndexCompression, final boolean blockAlign,
-      final long superBlockAlignmentSize, final long superBlockAlignmentSpaceOverheadRatio,
-      final byte indexShortening, final byte filterPolicyType, final long filterPolicyHandle,
+      final boolean enableIndexCompression, final boolean blockAlign, final byte indexShortening,
+      final byte filterPolicyType, final long filterPolicyHandle,
       final double filterPolicyConfigValue) {
     this.cacheIndexAndFilterBlocks = cacheIndexAndFilterBlocks;
     this.cacheIndexAndFilterBlocksWithHighPriority = cacheIndexAndFilterBlocksWithHighPriority;
@@ -89,8 +86,6 @@ public class BlockBasedTableConfig extends TableFormatConfig {
     this.formatVersion = formatVersion;
     this.enableIndexCompression = enableIndexCompression;
     this.blockAlign = blockAlign;
-    this.superBlockAlignmentSize = superBlockAlignmentSize;
-    this.superBlockAlignmentSpaceOverheadRatio = superBlockAlignmentSpaceOverheadRatio;
     this.indexShortening = IndexShorteningMode.values()[indexShortening];
     try (Filter filterPolicy = FilterPolicyType.values()[filterPolicyType].createFilter(
              filterPolicyHandle, filterPolicyConfigValue)) {
@@ -805,50 +800,6 @@ public class BlockBasedTableConfig extends TableFormatConfig {
   }
 
   /**
-   * Get the super block alignment size.
-   *
-   * @return the super block alignment size.
-   */
-  public long superBlockAlignmentSize() {
-    return superBlockAlignmentSize;
-  }
-
-  /**
-   * Set the super block alignment size.
-   * When set to 0, super block alignment is disabled.
-   *
-   * @param superBlockAlignmentSize the super block alignment size.
-   *
-   * @return the reference to the current option.
-   */
-  public BlockBasedTableConfig setSuperBlockAlignmentSize(final long superBlockAlignmentSize) {
-    this.superBlockAlignmentSize = superBlockAlignmentSize;
-    return this;
-  }
-
-  /**
-   * Get the space overhead ratio of super block alignment.
-   *
-   * @return space overhead ratio of super block alignment.
-   */
-  public long superBlockAlignmentSpaceOverheadRatio() {
-    return superBlockAlignmentSpaceOverheadRatio;
-  }
-
-  /**
-   * Set the space overhead ratio of super block alignment.
-   *
-   * @param superBlockAlignmentSpaceOverheadRatio the space overhead ratio of super block alignment.
-   *
-   * @return the reference to the current option.
-   */
-  public BlockBasedTableConfig setSuperBlockAlignmentSpaceOverheadRatio(
-      final long superBlockAlignmentSpaceOverheadRatio) {
-    this.superBlockAlignmentSpaceOverheadRatio = superBlockAlignmentSpaceOverheadRatio;
-    return this;
-  }
-
-  /**
    * Get the index shortening mode.
    *
    * @return the index shortening mode.
@@ -995,8 +946,7 @@ public class BlockBasedTableConfig extends TableFormatConfig {
         indexBlockRestartInterval, metadataBlockSize, partitionFilters, optimizeFiltersForMemory,
         useDeltaEncoding, filterPolicyHandle, wholeKeyFiltering, verifyCompression,
         readAmpBytesPerBit, formatVersion, enableIndexCompression, blockAlign,
-        superBlockAlignmentSize, superBlockAlignmentSpaceOverheadRatio, indexShortening.getValue(),
-        blockCacheSize, blockCacheNumShardBits);
+        indexShortening.getValue(), blockCacheSize, blockCacheNumShardBits);
   }
 
   private static native long newTableFactoryHandle(final boolean cacheIndexAndFilterBlocks,
@@ -1011,8 +961,7 @@ public class BlockBasedTableConfig extends TableFormatConfig {
       final boolean useDeltaEncoding, final long filterPolicyHandle,
       final boolean wholeKeyFiltering, final boolean verifyCompression,
       final int readAmpBytesPerBit, final int formatVersion, final boolean enableIndexCompression,
-      final boolean blockAlign, final long superBlockAlignmentSize,
-      final long superBlockAlignmentSpaceOverheadRatio, final byte indexShortening,
+      final boolean blockAlign, final byte indexShortening,
 
       @Deprecated final long blockCacheSize, @Deprecated final int blockCacheNumShardBits);
 
@@ -1043,8 +992,6 @@ public class BlockBasedTableConfig extends TableFormatConfig {
   private int formatVersion;
   private boolean enableIndexCompression;
   private boolean blockAlign;
-  private long superBlockAlignmentSize;
-  private long superBlockAlignmentSpaceOverheadRatio;
   private IndexShorteningMode indexShortening;
 
   // NOTE: ONLY used if blockCache == null

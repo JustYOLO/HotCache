@@ -1,6 +1,12 @@
 make_config.mk
 rocksdb.pc
 
+compile.commands.json
+coworkMotivation.sh
+*.sh
+*.bak
+/*.txt
+
 <<<<<<< Updated upstream
 =======
 db_bench
@@ -9,6 +15,7 @@ cowork/
 data/
 results/mempurge/
 results/
+zipf/
 
 >>>>>>> Stashed changes
 *.a

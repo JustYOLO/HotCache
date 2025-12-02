@@ -27,7 +27,6 @@ struct ImmutableDBOptions {
   bool flush_verify_memtable_count;
   bool compaction_verify_record_count;
   bool track_and_verify_wals_in_manifest;
-  bool track_and_verify_wals;
   bool verify_sst_unique_id_in_manifest;
   Env* env;
   std::shared_ptr<RateLimiter> rate_limiter;
@@ -47,10 +46,12 @@ struct ImmutableDBOptions {
   size_t log_file_time_to_roll;
   size_t keep_log_file_num;
   size_t recycle_log_file_num;
+  uint64_t max_manifest_file_size;
   int table_cache_numshardbits;
   uint64_t WAL_ttl_seconds;
   uint64_t WAL_size_limit_MB;
   uint64_t max_write_batch_group_size_bytes;
+  size_t manifest_preallocation_size;
   bool allow_mmap_reads;
   bool allow_mmap_writes;
   bool use_direct_reads;
@@ -60,6 +61,7 @@ struct ImmutableDBOptions {
   bool advise_random_on_open;
   size_t db_write_buffer_size;
   std::shared_ptr<WriteBufferManager> write_buffer_manager;
+  size_t random_access_max_buffer_size;
   bool use_adaptive_mutex;
   std::vector<std::shared_ptr<EventListener>> listeners;
   bool enable_thread_tracking;
@@ -75,6 +77,7 @@ struct ImmutableDBOptions {
   bool allow_2pc;
   std::shared_ptr<Cache> row_cache;
   WalFilter* wal_filter;
+  bool fail_if_options_file_error;
   bool dump_malloc_stats;
   bool avoid_flush_during_recovery;
   bool allow_ingest_behind;
@@ -104,7 +107,9 @@ struct ImmutableDBOptions {
   uint64_t follower_catchup_retry_wait_ms;
   Temperature metadata_write_temperature;
   Temperature wal_write_temperature;
-  CompactionStyleSet calculate_sst_write_lifetime_hint_set;
+
+  // Lee: memtable logging flag
+  bool enable_memtable_logging;
 
   // Beginning convenience/helper objects that are not part of the base
   // DBOptions
@@ -144,9 +149,6 @@ struct MutableDBOptions {
   bool strict_bytes_per_sync;
   size_t compaction_readahead_size;
   int max_background_flushes;
-  uint64_t max_manifest_file_size;
-  int max_manifest_space_amp_pct;
-  size_t manifest_preallocation_size;
   std::string daily_offpeak_time_utc;
 };
 

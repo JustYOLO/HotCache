@@ -377,8 +377,6 @@ TEST_F(DBPropertiesTest, AggregatedTableProperties) {
         NewBloomFilterPolicy(kBloomBitsPerKey, false));
     table_options.block_size = 1024;
     options.table_factory.reset(NewBlockBasedTableFactory(table_options));
-    // The checks assume kTableCount number of files
-    options.disable_auto_compactions = true;
 
     DestroyAndReopen(options);
 
@@ -569,7 +567,7 @@ TEST_F(DBPropertiesTest, AggregatedTablePropertiesAtLevel) {
   options.target_file_size_base = 8192;
   options.max_bytes_for_level_base = 10000;
   options.max_bytes_for_level_multiplier = 2;
-  // The checks assume kTableCount number of files
+  // This ensures there no compaction happening when we call GetProperty().
   options.disable_auto_compactions = true;
   options.merge_operator.reset(new TestPutOperator());
 

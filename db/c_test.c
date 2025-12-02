@@ -103,12 +103,6 @@ static void CheckValue(char* err, const char* expected, char** actual,
   Free(actual);
 }
 
-static void CheckPinnedValue(char* err, const char* expected,
-                             const char** actual, size_t actual_length) {
-  CheckNoError(err);
-  CheckEqual(expected, *actual, actual_length);
-}
-
 static void CheckGet(rocksdb_t* db, const rocksdb_readoptions_t* options,
                      const char* key, const char* expected) {
   char* err = NULL;
@@ -1036,78 +1030,6 @@ int main(int argc, char** argv) {
     rocksdb_options_set_error_if_exists(options, 1);
   }
 
-  StartPhase("checkpoint_export_column_family");
-  {
-    static char cf_export_path[200];
-    static char db_import_path[200];
-    snprintf(cf_export_path, sizeof(cf_export_path),
-             "%s/rocksdb_c_test-%d-cf_export", GetTempDir(), ((int)geteuid()));
-    snprintf(db_import_path, sizeof(db_import_path),
-             "%s/rocksdb_c_test-%d-db_import", GetTempDir(), ((int)geteuid()));
-
-    rocksdb_options_t* db_options = rocksdb_options_create();
-    rocksdb_column_family_handle_t* cf_export =
-        rocksdb_create_column_family(db, db_options, "cf_export", &err);
-    CheckNoError(err);
-
-    rocksdb_put_cf(db, woptions, cf_export, "k1", 2, "v1", 2, &err);
-    CheckNoError(err);
-    rocksdb_put_cf(db, woptions, cf_export, "k2", 2, "v2", 2, &err);
-    CheckNoError(err);
-
-    rocksdb_checkpoint_t* checkpoint =
-        rocksdb_checkpoint_object_create(db, &err);
-    CheckNoError(err);
-
-    rocksdb_export_import_files_metadata_t* export_metadata =
-        rocksdb_checkpoint_export_column_family(checkpoint, cf_export,
-                                                cf_export_path, &err);
-    CheckNoError(err);
-    const char* comparator_name =
-        rocksdb_export_import_files_metadata_get_db_comparator_name(
-            export_metadata);
-    CheckEqual("leveldb.BytewiseComparator", comparator_name, 26);
-    rocksdb_free((void*)comparator_name);
-    rocksdb_checkpoint_object_destroy(checkpoint);
-    checkpoint = NULL;
-    rocksdb_drop_column_family(db, cf_export, &err);
-    CheckNoError(err);
-    rocksdb_column_family_handle_destroy(cf_export);
-    rocksdb_options_set_create_if_missing(db_options, 1);
-    rocksdb_options_set_error_if_exists(db_options, 1);
-    rocksdb_t* db_import = rocksdb_open(db_options, db_import_path, &err);
-    CheckNoError(err);
-    rocksdb_import_column_family_options_t* import_options =
-        rocksdb_import_column_family_options_create();
-    rocksdb_column_family_handle_t* cf_import =
-        rocksdb_create_column_family_with_import(db_import, db_options,
-                                                 "cf_import", import_options,
-                                                 export_metadata, &err);
-    CheckNoError(err);
-    rocksdb_import_column_family_options_destroy(import_options);
-    rocksdb_export_import_files_metadata_destroy(export_metadata);
-    size_t val_len;
-    char* val =
-        rocksdb_get_cf(db_import, roptions, cf_import, "k1", 2, &val_len, &err);
-    CheckNoError(err);
-    CheckEqual("v1", val, val_len);
-    free(val);
-
-    val =
-        rocksdb_get_cf(db_import, roptions, cf_import, "k2", 2, &val_len, &err);
-    CheckNoError(err);
-    CheckEqual("v2", val, val_len);
-    free(val);
-
-    rocksdb_column_family_handle_destroy(cf_import);
-    cf_import = NULL;
-    rocksdb_close(db_import);
-    rocksdb_destroy_db(db_options, db_import_path, &err);
-    CheckNoError(err);
-    rocksdb_options_destroy(db_options);
-    db_options = NULL;
-  }
-
   StartPhase("compactall");
   rocksdb_compact_range(db, NULL, 0, NULL, 0);
   CheckGet(db, roptions, "foo", "hello");
@@ -1255,70 +1177,6 @@ int main(int argc, char** argv) {
     rocksdb_writebatch_destroy(wb);
   }
 
-  StartPhase("writebatch_vectors_cf");
-  {
-    const char* cf_name = "wb_vectors_cf";
-    rocksdb_column_family_handle_t* wb_cf =
-        rocksdb_create_column_family(db, options, cf_name, &err);
-    CheckNoError(err);
-
-    rocksdb_writebatch_t* wb = rocksdb_writebatch_create();
-
-    // Test putv_cf: concatenates multiple slices into a single key/value
-    const char* put_keys[2] = {"k", "ey"};
-    const size_t put_key_sizes[2] = {1, 2};
-    const char* put_vals[3] = {"v", "a", "l"};
-    const size_t put_val_sizes[3] = {1, 1, 1};
-    rocksdb_writebatch_putv_cf(wb, wb_cf, 2, put_keys, put_key_sizes, 3,
-                               put_vals, put_val_sizes);
-    rocksdb_write(db, woptions, wb, &err);
-    CheckNoError(err);
-    // putv_cf concatenates: key="k"+"ey"="key", value="v"+"a"+"l"="val"
-    CheckGetCF(db, roptions, wb_cf, "key", "val");
-    CheckGetCF(db, roptions, wb_cf, "k", NULL);
-    CheckGetCF(db, roptions, wb_cf, "ey", NULL);
-
-    // Test deletev_cf: concatenates multiple slices for key
-    rocksdb_writebatch_clear(wb);
-    const char* del_keys[2] = {"k", "ey"};
-    const size_t del_key_sizes[2] = {1, 2};
-    rocksdb_writebatch_deletev_cf(wb, wb_cf, 2, del_keys, del_key_sizes);
-    rocksdb_write(db, woptions, wb, &err);
-    CheckNoError(err);
-    CheckGetCF(db, roptions, wb_cf, "key", NULL);
-
-    // Test delete_rangev_cf: concatenates slices for range deletion
-    rocksdb_writebatch_clear(wb);
-    rocksdb_writebatch_put_cf(wb, wb_cf, "a", 1, "1", 1);
-    rocksdb_writebatch_put_cf(wb, wb_cf, "b", 1, "2", 1);
-    rocksdb_writebatch_put_cf(wb, wb_cf, "c", 1, "3", 1);
-    rocksdb_write(db, woptions, wb, &err);
-    CheckNoError(err);
-    CheckGetCF(db, roptions, wb_cf, "a", "1");
-    CheckGetCF(db, roptions, wb_cf, "b", "2");
-    CheckGetCF(db, roptions, wb_cf, "c", "3");
-
-    rocksdb_writebatch_clear(wb);
-    const char* range_start[2] = {"a", ""};  // "a" + "" = "a"
-    const size_t range_start_sizes[2] = {1, 0};
-    const char* range_end[2] = {"c", ""};
-    const size_t range_end_sizes[2] = {1, 0};
-    rocksdb_writebatch_delete_rangev_cf(wb, wb_cf, 2, range_start,
-                                        range_start_sizes, range_end,
-                                        range_end_sizes);
-    rocksdb_write(db, woptions, wb, &err);
-    CheckNoError(err);
-    // Range [a, c) should delete "a" and "b", but not "c"
-    CheckGetCF(db, roptions, wb_cf, "a", NULL);
-    CheckGetCF(db, roptions, wb_cf, "b", NULL);
-    CheckGetCF(db, roptions, wb_cf, "c", "3");
-
-    rocksdb_writebatch_destroy(wb);
-    rocksdb_drop_column_family(db, wb_cf, &err);
-    CheckNoError(err);
-    rocksdb_column_family_handle_destroy(wb_cf);
-  }
-
   StartPhase("writebatch_vectors");
   {
     rocksdb_writebatch_t* wb = rocksdb_writebatch_create();
@@ -1387,8 +1245,6 @@ int main(int argc, char** argv) {
     CheckCondition(count == 3);
     size_t size;
     char* value;
-    const char* pinned_value;
-    rocksdb_pinnableslice_t* p;
     value = rocksdb_writebatch_wi_get_from_batch(wbi, options, "box", 3, &size,
                                                  &err);
     CheckValue(err, "c", &value, size);
@@ -1398,19 +1254,9 @@ int main(int argc, char** argv) {
     value = rocksdb_writebatch_wi_get_from_batch_and_db(wbi, db, roptions,
                                                         "foo", 3, &size, &err);
     CheckValue(err, "hello", &value, size);
-    p = rocksdb_writebatch_wi_get_pinned_from_batch_and_db(wbi, db, roptions,
-                                                           "foo", 3, &err);
-    pinned_value = rocksdb_pinnableslice_value(p, &size);
-    CheckPinnedValue(err, "hello", &pinned_value, size);
-    rocksdb_pinnableslice_destroy(p);
     value = rocksdb_writebatch_wi_get_from_batch_and_db(wbi, db, roptions,
                                                         "box", 3, &size, &err);
     CheckValue(err, "c", &value, size);
-    p = rocksdb_writebatch_wi_get_pinned_from_batch_and_db(wbi, db, roptions,
-                                                           "box", 3, &err);
-    pinned_value = rocksdb_pinnableslice_value(p, &size);
-    CheckPinnedValue(err, "c", &pinned_value, size);
-    rocksdb_pinnableslice_destroy(p);
     rocksdb_write_writebatch_wi(db, woptions, wbi, &err);
     CheckNoError(err);
     CheckGet(db, roptions, "foo", "hello");
@@ -1484,43 +1330,6 @@ int main(int argc, char** argv) {
     rocksdb_iter_destroy(iter);
   }
 
-  StartPhase("iter_slice");
-  {
-    // Test the new slice-based iterator API for better performance
-    rocksdb_iterator_t* iter = rocksdb_create_iterator(db, roptions);
-    CheckCondition(!rocksdb_iter_valid(iter));
-    rocksdb_iter_seek_to_first(iter);
-    CheckCondition(rocksdb_iter_valid(iter));
-
-    // Test rocksdb_iter_key_slice
-    rocksdb_slice_t key_slice = rocksdb_iter_key_slice(iter);
-    CheckEqual("box", key_slice.data, key_slice.size);
-
-    // Test rocksdb_iter_value_slice
-    rocksdb_slice_t value_slice = rocksdb_iter_value_slice(iter);
-    CheckEqual("c", value_slice.data, value_slice.size);
-
-    // Move to next entry and test again
-    rocksdb_iter_next(iter);
-    CheckCondition(rocksdb_iter_valid(iter));
-    key_slice = rocksdb_iter_key_slice(iter);
-    value_slice = rocksdb_iter_value_slice(iter);
-    CheckEqual("foo", key_slice.data, key_slice.size);
-    CheckEqual("hello", value_slice.data, value_slice.size);
-
-    // Test seeking with slice API
-    rocksdb_iter_seek(iter, "b", 1);
-    CheckCondition(rocksdb_iter_valid(iter));
-    key_slice = rocksdb_iter_key_slice(iter);
-    value_slice = rocksdb_iter_value_slice(iter);
-    CheckEqual("box", key_slice.data, key_slice.size);
-    CheckEqual("c", value_slice.data, value_slice.size);
-
-    rocksdb_iter_get_error(iter, &err);
-    CheckNoError(err);
-    rocksdb_iter_destroy(iter);
-  }
-
   StartPhase("wbwi_iter");
   {
     rocksdb_iterator_t* base_iter = rocksdb_create_iterator(db, roptions);
@@ -1553,46 +1362,6 @@ int main(int argc, char** argv) {
     rocksdb_writebatch_wi_destroy(wbi);
   }
 
-  StartPhase("wbwi_iter_readoptions");
-  {
-    rocksdb_readoptions_t* iter_roptions = rocksdb_readoptions_create();
-    rocksdb_readoptions_set_iterate_lower_bound(iter_roptions, "boy", 3);
-    rocksdb_readoptions_set_iterate_upper_bound(iter_roptions, "fool", 4);
-    rocksdb_iterator_t* base_iter = rocksdb_create_iterator(db, iter_roptions);
-    rocksdb_writebatch_wi_t* wbi = rocksdb_writebatch_wi_create(0, 1);
-    rocksdb_writebatch_wi_put(wbi, "bar", 3, "b",
-                              1);  // should get filtered out
-    rocksdb_writebatch_wi_put(wbi, "cat", 3, "miau", 4);
-    rocksdb_writebatch_wi_put(wbi, "gnu", 3, "muh",
-                              3);  // should get filtered out
-    rocksdb_iterator_t* iter =
-        rocksdb_writebatch_wi_create_iterator_with_base_readopts(wbi, base_iter,
-                                                                 iter_roptions);
-    CheckCondition(!rocksdb_iter_valid(iter));
-    rocksdb_iter_seek_to_first(iter);
-    CheckCondition(rocksdb_iter_valid(iter));
-    CheckIter(iter, "cat", "miau");
-    rocksdb_iter_next(iter);
-    CheckIter(iter, "foo", "hello");
-    rocksdb_iter_prev(iter);
-    CheckIter(iter, "cat", "miau");
-    rocksdb_iter_prev(iter);
-    CheckCondition(!rocksdb_iter_valid(iter));
-    rocksdb_iter_seek_to_last(iter);
-    CheckIter(iter, "foo", "hello");
-    rocksdb_iter_seek(iter, "b", 1);
-    CheckIter(iter, "cat", "miau");
-    rocksdb_iter_seek_for_prev(iter, "d", 1);
-    CheckIter(iter, "cat", "miau");
-    rocksdb_iter_seek_for_prev(iter, "fool", 3);
-    CheckIter(iter, "foo", "hello");
-    rocksdb_iter_get_error(iter, &err);
-    CheckNoError(err);
-    rocksdb_iter_destroy(iter);
-    rocksdb_writebatch_wi_destroy(wbi);
-    rocksdb_readoptions_destroy(iter_roptions);
-  }
-
   StartPhase("multiget");
   {
     const char* keys[3] = {"box", "foo", "notfound"};
@@ -1604,53 +1373,6 @@ int main(int argc, char** argv) {
     rocksdb_multi_get(db, roptions, 3, keys, keys_sizes, vals, vals_sizes,
                       errs);
     CheckMultiGetValues(3, vals, vals_sizes, errs, expected);
-  }
-
-  StartPhase("zero_copy_get_pinned_v2");
-  {
-    // Test new zero-copy get functions
-
-    // Test rocksdb_get_pinned_v2
-    rocksdb_pinnable_handle_t* handle =
-        rocksdb_get_pinned_v2(db, roptions, "foo", 3, &err);
-    CheckNoError(err);
-    CheckCondition(handle != NULL);
-    size_t val_len;
-    const char* val = rocksdb_pinnable_handle_get_value(handle, &val_len);
-    CheckEqual("hello", val, val_len);
-    rocksdb_pinnable_handle_destroy(handle);
-
-    // Test with non-existent key
-    handle = rocksdb_get_pinned_v2(db, roptions, "notfound", 8, &err);
-    CheckNoError(err);
-    CheckCondition(handle == NULL);
-
-    // Test rocksdb_get_into_buffer
-    char buffer[100];
-    unsigned char found;
-    unsigned char success = rocksdb_get_into_buffer(
-        db, roptions, "foo", 3, buffer, sizeof(buffer), &val_len, &found, &err);
-    CheckNoError(err);
-    CheckCondition(success == 1);
-    CheckCondition(found == 1);
-    CheckCondition(val_len == 5);
-    CheckCondition(memcmp(buffer, "hello", 5) == 0);
-
-    // Test with buffer too small
-    success = rocksdb_get_into_buffer(db, roptions, "foo", 3, buffer,
-                                      2,  // Buffer too small
-                                      &val_len, &found, &err);
-    CheckNoError(err);
-    CheckCondition(success == 0);  // Should fail due to small buffer
-    CheckCondition(found == 1);
-    CheckCondition(val_len == 5);  // Should still report actual size
-
-    // Test with non-existent key
-    success = rocksdb_get_into_buffer(db, roptions, "notfound", 8, buffer,
-                                      sizeof(buffer), &val_len, &found, &err);
-    CheckNoError(err);
-    CheckCondition(success == 0);
-    CheckCondition(found == 0);
   }
 
   StartPhase("pin_get");
@@ -2070,84 +1792,6 @@ int main(int argc, char** argv) {
     rocksdb_flush_wal(db, 1, &err);
     CheckNoError(err);
 
-    // Test column family handle get name
-    {
-      size_t name_len;
-      char* cf_name =
-          rocksdb_column_family_handle_get_name(handles[1], &name_len);
-      CheckCondition(name_len == 3);
-      CheckCondition(memcmp(cf_name, "cf1", 3) == 0);
-      rocksdb_free(cf_name);
-    }
-
-    // Test zero-copy get with column families
-    {
-      rocksdb_pinnable_handle_t* handle =
-          rocksdb_get_pinned_cf_v2(db, roptions, handles[1], "box", 3, &err);
-      CheckNoError(err);
-      CheckCondition(handle != NULL);
-      size_t val_len;
-      const char* val = rocksdb_pinnable_handle_get_value(handle, &val_len);
-      CheckEqual("c", val, val_len);
-      rocksdb_pinnable_handle_destroy(handle);
-
-      // Test with non-existent key
-      handle = rocksdb_get_pinned_cf_v2(db, roptions, handles[1], "notfound", 8,
-                                        &err);
-      CheckNoError(err);
-      CheckCondition(handle == NULL);
-
-      // Test rocksdb_get_into_buffer_cf
-      char buffer[100];
-      unsigned char found;
-      unsigned char success = rocksdb_get_into_buffer_cf(
-          db, roptions, handles[1], "buff", 4, buffer, sizeof(buffer), &val_len,
-          &found, &err);
-      CheckNoError(err);
-      CheckCondition(success == 1);
-      CheckCondition(found == 1);
-      CheckCondition(val_len == 7);
-      CheckCondition(memcmp(buffer, "rocksdb", 7) == 0);
-
-      // Test with buffer too small
-      success = rocksdb_get_into_buffer_cf(db, roptions, handles[1], "buff", 4,
-                                           buffer, 3,  // Buffer too small
-                                           &val_len, &found, &err);
-      CheckNoError(err);
-      CheckCondition(success == 0);  // Should fail due to small buffer
-      CheckCondition(found == 1);
-      CheckCondition(val_len == 7);  // Should still report actual size
-    }
-
-    // Test WriteBatchWithIndex iteration with Column Family
-    rocksdb_writebatch_wi_t* wbwi = rocksdb_writebatch_wi_create(0, true);
-    rocksdb_writebatch_wi_put_cf(wbwi, handles[1], "boat", 4, "row",
-                                 3);  // should be filtered out
-    rocksdb_writebatch_wi_put_cf(wbwi, handles[1], "buffy", 5, "charmed", 7);
-    rocksdb_writebatch_wi_put_cf(wbwi, handles[1], "bus", 3, "yellow",
-                                 6);  // should be filtered out
-    rocksdb_readoptions_t* iter_roptions = rocksdb_readoptions_create();
-    rocksdb_readoptions_set_iterate_lower_bound(iter_roptions, "bu", 2);
-    rocksdb_readoptions_set_iterate_upper_bound(iter_roptions, "buffz", 5);
-    rocksdb_iterator_t* base_iter =
-        rocksdb_create_iterator_cf(db, iter_roptions, handles[1]);
-    rocksdb_iterator_t* wbwi_iter =
-        rocksdb_writebatch_wi_create_iterator_with_base_cf_readopts(
-            wbwi, base_iter, handles[1], iter_roptions);
-
-    CheckCondition(!rocksdb_iter_valid(wbwi_iter));
-    rocksdb_iter_seek_to_first(wbwi_iter);
-    CheckCondition(rocksdb_iter_valid(wbwi_iter));
-    CheckIter(wbwi_iter, "buff", "rocksdb");
-    rocksdb_iter_next(wbwi_iter);
-    CheckIter(wbwi_iter, "buffy", "charmed");
-    rocksdb_iter_next(wbwi_iter);
-    CheckCondition(!rocksdb_iter_valid(wbwi_iter));
-
-    rocksdb_iter_destroy(wbwi_iter);
-    rocksdb_writebatch_wi_destroy(wbwi);
-    rocksdb_readoptions_destroy(iter_roptions);
-
     const char* keys[3] = {"box", "box", "barfooxx"};
     const rocksdb_column_family_handle_t* get_handles[3] = {
         handles[0], handles[1], handles[1]};
@@ -2192,74 +1836,6 @@ int main(int argc, char** argv) {
         CheckNoError(batched_errs[i]);
         CheckEqual(expected_value[i], val, val_len);
         rocksdb_pinnableslice_destroy(pvals[i]);
-      }
-    }
-
-    {
-      // Test rocksdb_batched_multi_get_cf_slice for better performance
-      // Build rocksdb_slice_t array directly to avoid conversion overhead
-      rocksdb_slice_t batched_key_slices[4];
-      batched_key_slices[0].data = "box";
-      batched_key_slices[0].size = 3;
-      batched_key_slices[1].data = "buff";
-      batched_key_slices[1].size = 4;
-      batched_key_slices[2].data = "barfooxx";
-      batched_key_slices[2].size = 8;
-      batched_key_slices[3].data = "box";
-      batched_key_slices[3].size = 3;
-
-      const char* expected_value[4] = {"c", "rocksdb", NULL, "c"};
-      char* batched_errs[4];
-      rocksdb_pinnableslice_t* pvals[4];
-
-      rocksdb_batched_multi_get_cf_slice(db, roptions, handles[1], 4,
-                                         batched_key_slices, pvals,
-                                         batched_errs, false);
-
-      const char* val;
-      size_t val_len;
-      for (i = 0; i < 4; ++i) {
-        CheckNoError(batched_errs[i]);
-        if (pvals[i] != NULL) {
-          val = rocksdb_pinnableslice_value(pvals[i], &val_len);
-          CheckEqual(expected_value[i], val, val_len);
-          rocksdb_pinnableslice_destroy(pvals[i]);
-        } else {
-          CheckEqual(expected_value[i], NULL, 0);
-        }
-      }
-    }
-
-    {
-      // Test rocksdb_batched_multi_get_cf_slice with sorted_input=true
-      // Keys must be in sorted order for this optimization
-      rocksdb_slice_t sorted_key_slices[3];
-      sorted_key_slices[0].data = "box";
-      sorted_key_slices[0].size = 3;
-      sorted_key_slices[1].data = "buff";
-      sorted_key_slices[1].size = 4;
-      sorted_key_slices[2].data = "notfound";
-      sorted_key_slices[2].size = 8;
-
-      const char* expected_value[3] = {"c", "rocksdb", NULL};
-      char* batched_errs[3];
-      rocksdb_pinnableslice_t* pvals[3];
-
-      rocksdb_batched_multi_get_cf_slice(db, roptions, handles[1], 3,
-                                         sorted_key_slices, pvals, batched_errs,
-                                         true);
-
-      const char* val;
-      size_t val_len;
-      for (i = 0; i < 3; ++i) {
-        CheckNoError(batched_errs[i]);
-        if (pvals[i] != NULL) {
-          val = rocksdb_pinnableslice_value(pvals[i], &val_len);
-          CheckEqual(expected_value[i], val, val_len);
-          rocksdb_pinnableslice_destroy(pvals[i]);
-        } else {
-          CheckEqual(expected_value[i], NULL, 0);
-        }
       }
     }
 
@@ -2553,19 +2129,15 @@ int main(int argc, char** argv) {
     CheckCondition(100000 ==
                    rocksdb_options_get_periodic_compaction_seconds(o));
 
-    rocksdb_options_set_memtable_op_scan_flush_trigger(o, 100);
-    CheckCondition(100 ==
-                   rocksdb_options_get_memtable_op_scan_flush_trigger(o));
-
-    rocksdb_options_set_memtable_avg_op_scan_flush_trigger(o, 150);
-    CheckCondition(150 ==
-                   rocksdb_options_get_memtable_avg_op_scan_flush_trigger(o));
-
     rocksdb_options_set_ttl(o, 5000);
     CheckCondition(5000 == rocksdb_options_get_ttl(o));
 
     rocksdb_options_set_skip_stats_update_on_db_open(o, 1);
     CheckCondition(1 == rocksdb_options_get_skip_stats_update_on_db_open(o));
+
+    rocksdb_options_set_skip_checking_sst_file_sizes_on_db_open(o, 1);
+    CheckCondition(
+        1 == rocksdb_options_get_skip_checking_sst_file_sizes_on_db_open(o));
 
     rocksdb_options_set_max_write_buffer_number(o, 97);
     CheckCondition(97 == rocksdb_options_get_max_write_buffer_number(o));
@@ -2573,6 +2145,10 @@ int main(int argc, char** argv) {
     rocksdb_options_set_min_write_buffer_number_to_merge(o, 23);
     CheckCondition(23 ==
                    rocksdb_options_get_min_write_buffer_number_to_merge(o));
+
+    rocksdb_options_set_max_write_buffer_number_to_maintain(o, 64);
+    CheckCondition(64 ==
+                   rocksdb_options_get_max_write_buffer_number_to_maintain(o));
 
     rocksdb_options_set_max_write_buffer_size_to_maintain(o, 50000);
     CheckCondition(50000 ==
@@ -2826,9 +2402,13 @@ int main(int argc, char** argv) {
     CheckCondition(2.0 ==
                    rocksdb_options_get_max_bytes_for_level_multiplier(copy));
     CheckCondition(1 == rocksdb_options_get_skip_stats_update_on_db_open(copy));
+    CheckCondition(
+        1 == rocksdb_options_get_skip_checking_sst_file_sizes_on_db_open(copy));
     CheckCondition(97 == rocksdb_options_get_max_write_buffer_number(copy));
     CheckCondition(23 ==
                    rocksdb_options_get_min_write_buffer_number_to_merge(copy));
+    CheckCondition(
+        64 == rocksdb_options_get_max_write_buffer_number_to_maintain(copy));
     CheckCondition(50000 ==
                    rocksdb_options_get_max_write_buffer_size_to_maintain(copy));
     CheckCondition(1 == rocksdb_options_get_enable_pipelined_write(copy));
@@ -2992,18 +2572,6 @@ int main(int argc, char** argv) {
     CheckCondition(100000 ==
                    rocksdb_options_get_periodic_compaction_seconds(o));
 
-    rocksdb_options_set_memtable_op_scan_flush_trigger(copy, 800);
-    CheckCondition(800 ==
-                   rocksdb_options_get_memtable_op_scan_flush_trigger(copy));
-    CheckCondition(100 ==
-                   rocksdb_options_get_memtable_op_scan_flush_trigger(o));
-
-    rocksdb_options_set_memtable_avg_op_scan_flush_trigger(copy, 900);
-    CheckCondition(
-        900 == rocksdb_options_get_memtable_avg_op_scan_flush_trigger(copy));
-    CheckCondition(150 ==
-                   rocksdb_options_get_memtable_avg_op_scan_flush_trigger(o));
-
     rocksdb_options_set_ttl(copy, 8000);
     CheckCondition(8000 == rocksdb_options_get_ttl(copy));
     CheckCondition(5000 == rocksdb_options_get_ttl(o));
@@ -3011,6 +2579,12 @@ int main(int argc, char** argv) {
     rocksdb_options_set_skip_stats_update_on_db_open(copy, 0);
     CheckCondition(0 == rocksdb_options_get_skip_stats_update_on_db_open(copy));
     CheckCondition(1 == rocksdb_options_get_skip_stats_update_on_db_open(o));
+
+    rocksdb_options_set_skip_checking_sst_file_sizes_on_db_open(copy, 0);
+    CheckCondition(
+        0 == rocksdb_options_get_skip_checking_sst_file_sizes_on_db_open(copy));
+    CheckCondition(
+        1 == rocksdb_options_get_skip_checking_sst_file_sizes_on_db_open(o));
 
     rocksdb_options_set_max_write_buffer_number(copy, 2000);
     CheckCondition(2000 == rocksdb_options_get_max_write_buffer_number(copy));
@@ -3021,6 +2595,12 @@ int main(int argc, char** argv) {
                    rocksdb_options_get_min_write_buffer_number_to_merge(copy));
     CheckCondition(23 ==
                    rocksdb_options_get_min_write_buffer_number_to_merge(o));
+
+    rocksdb_options_set_max_write_buffer_number_to_maintain(copy, 128);
+    CheckCondition(
+        128 == rocksdb_options_get_max_write_buffer_number_to_maintain(copy));
+    CheckCondition(64 ==
+                   rocksdb_options_get_max_write_buffer_number_to_maintain(o));
 
     rocksdb_options_set_max_write_buffer_size_to_maintain(copy, 9000);
     CheckCondition(9000 ==
@@ -3357,15 +2937,6 @@ int main(int argc, char** argv) {
 
     rocksdb_compactoptions_set_target_level(co, 1);
     CheckCondition(1 == rocksdb_compactoptions_get_target_level(co));
-
-    rocksdb_compactoptions_set_target_path_id(co, 1);
-    CheckCondition(1 == rocksdb_compactoptions_get_target_path_id(co));
-
-    rocksdb_compactoptions_set_allow_write_stall(co, 1);
-    CheckCondition(1 == rocksdb_compactoptions_get_allow_write_stall(co));
-
-    rocksdb_compactoptions_set_max_subcompactions(co, 1);
-    CheckCondition(1 == rocksdb_compactoptions_get_max_subcompactions(co));
 
     rocksdb_compactoptions_destroy(co);
   }
@@ -3733,17 +3304,6 @@ int main(int argc, char** argv) {
 
     rocksdb_transaction_put(txn, "foo", 3, "hello", 5, &err);
     CheckNoError(err);
-
-    // test transaction get/set name (before commit)
-    {
-      rocksdb_transaction_set_name(txn, "test_txn", 8, &err);
-      CheckNoError(err);
-      size_t name_len;
-      char* txn_name = rocksdb_transaction_get_name(txn, &name_len);
-      CheckCondition(name_len == 8);
-      CheckCondition(memcmp(txn_name, "test_txn", 8) == 0);
-      rocksdb_free(txn_name);
-    }
 
     // read from outside transaction, before commit
     CheckTxnDBGet(txn_db, roptions, "foo", NULL);
@@ -4481,23 +4041,6 @@ int main(int argc, char** argv) {
 
     rocksdb_write_buffer_manager_destroy(write_buffer_manager);
     rocksdb_cache_destroy(lru);
-  }
-
-  StartPhase("sst_file_manager");
-  {
-    rocksdb_sst_file_manager_t* sst_file_manager;
-    sst_file_manager = rocksdb_sst_file_manager_create(env);
-    rocksdb_sst_file_manager_set_delete_rate_bytes_per_second(sst_file_manager,
-                                                              1);
-    rocksdb_sst_file_manager_set_max_trash_db_ratio(sst_file_manager, 0.75);
-
-    CheckCondition(1 ==
-                   rocksdb_sst_file_manager_get_delete_rate_bytes_per_second(
-                       sst_file_manager));
-    CheckCondition(0.75 == rocksdb_sst_file_manager_get_max_trash_db_ratio(
-                               sst_file_manager));
-
-    rocksdb_sst_file_manager_destroy(sst_file_manager);
   }
 
   StartPhase("cancel_all_background_work");
