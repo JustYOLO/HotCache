@@ -968,7 +968,16 @@ Status FlushJob::WriteLevel0Table() {
           std::string fname(fname_buf);
 
           std::unique_ptr<WritableFile> log_file;
+          // lee: original
+          // EnvOptions log_env_opts(file_options_);
+
+          // disable directIO on memtable logging
           EnvOptions log_env_opts(file_options_);
+          log_env_opts.use_direct_writes = false;
+          log_env_opts.use_direct_reads = false;
+          log_env_opts.use_mmap_writes =
+              false;  // optional, but keeps it simple
+
           Status log_s =
               db_options_.env->NewWritableFile(fname, &log_file, log_env_opts);
           if (!log_s.ok()) {
