@@ -2803,11 +2803,13 @@ class SstArchiverListener : public rocksdb::EventListener {
  public:
   void OnCompactionCompleted(rocksdb::DB* /*db*/,
                              const rocksdb::CompactionJobInfo& ci) override {
+
     // Use input_file_infos (which contains level info) instead of inputs
     if (ci.input_file_infos.empty()) return;
 
     // Base Directory: {DB_PATH}/sst_archive
     std::string base_dir = FLAGS_db + "/sst_archive";
+
     if (mkdir(base_dir.c_str(), 0777) != 0) {
     }
 
@@ -5049,6 +5051,11 @@ class Benchmark {
     }
 
     options.listeners.emplace_back(listener_);
+
+    if (FLAGS_sst_logging) {
+      fprintf(stdout, ">> SST Logging Enabled: Hard linking files to ./sst_archive\n");
+      options.listeners.push_back(std::make_shared<SstArchiverListener>());
+    }
 
     if (options.file_checksum_gen_factory == nullptr) {
       if (FLAGS_file_checksum) {
