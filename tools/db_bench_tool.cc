@@ -30,6 +30,8 @@
 #ifdef __FreeBSD__
 #include <sys/sysctl.h>
 #endif
+#include <sys/stat.h>
+
 #include <atomic>
 #include <cinttypes>
 #include <condition_variable>
@@ -374,6 +376,8 @@ DEFINE_int32(user_timestamp_size, 0,
 DEFINE_int32(num_multi_db, 0,
              "Number of DBs used in the benchmark. 0 means single DB.");
 
+// lee: custom flags and benchmark structs
+
 DEFINE_double(zipf_const, 0.99, "Zipfian constant for Zipf distribution");
 
 DEFINE_int64(key_range, 10000000, "zipf key range");
@@ -385,6 +389,10 @@ struct BenchmarkParams {
 };
 
 static BenchmarkParams bench_params;
+
+DEFINE_bool(
+    sst_logging, false,
+    "If true, hard link compacted SST files to ./sst_archive for analysis");
 
 DEFINE_bool(set_memtable_key_appearance_distribution, false,
             "LYM custom option. If true, outputs memtable key appearance"
@@ -2789,6 +2797,55 @@ class Duration {
   uint64_t start_at_;
 };
 
+// lee: sst logging
+
+class SstArchiverListener : public rocksdb::EventListener {
+ public:
+  void OnCompactionCompleted(rocksdb::DB* /*db*/,
+                             const rocksdb::CompactionJobInfo& ci) override {
+    // Use input_file_infos (which contains level info) instead of inputs
+    if (ci.input_file_infos.empty()) return;
+
+    // Base Directory: {DB_PATH}/sst_archive
+    std::string base_dir = FLAGS_db + "/sst_archive";
+    if (mkdir(base_dir.c_str(), 0777) != 0) {
+    }
+
+    // Iterate through all input files using the index
+    for (size_t i = 0; i < ci.input_file_infos.size(); i++) {
+      // 1. Get the level for this specific file
+      int level = ci.input_file_infos[i].level;
+
+      // 2. Get the full source path (safest to take from input_files vector)
+      std::string src_path = ci.input_files[i];
+
+      // 3. Create Target Directory: sst_archive/Level_X
+      std::string level_dir = base_dir + "/Level_" + std::to_string(level);
+      if (mkdir(level_dir.c_str(), 0777) != 0) {
+      }
+
+      // 4. Extract filename
+      size_t last_slash = src_path.find_last_of('/');
+      std::string filename = (last_slash == std::string::npos)
+                                 ? src_path
+                                 : src_path.substr(last_slash + 1);
+
+      std::string dest_path = level_dir + "/" + filename;
+
+      // 5. Create Hard Link
+      if (access(dest_path.c_str(), F_OK) == -1) {
+        if (link(src_path.c_str(), dest_path.c_str()) != 0) {
+          fprintf(stderr, "Failed to link %s -> %s (Error: %s)\n",
+                  filename.c_str(), dest_path.c_str(), strerror(errno));
+        }
+      }
+    }
+  }
+};
+
+// Global run counter for cancel/resume-OpenAndCompact() testing
+static std::atomic<int> openandcompact_run_counter{0};
+
 class Benchmark {
  private:
   std::shared_ptr<Cache> cache_;
@@ -5043,6 +5100,12 @@ class Benchmark {
     }
 
     InitializeOptionsGeneral(opts);
+
+    if (FLAGS_sst_logging) {
+      fprintf(stdout,
+              ">> SST Logging Enabled: Hard linking files to ./sst_archive\n");
+      opts->listeners.push_back(std::make_shared<SstArchiverListener>());
+    }
   }
 
   void OpenDb(Options options, const std::string& db_name,

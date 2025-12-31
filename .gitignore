@@ -7,8 +7,8 @@ coworkMotivation.sh
 *.bak
 /*.txt
 
-<<<<<<< Updated upstream
-=======
+analyze_sst
+
 db_bench
 
 cowork/
@@ -17,7 +17,6 @@ results/mempurge/
 results/
 zipf/
 
->>>>>>> Stashed changes
 *.a
 *.arc
 *.d
