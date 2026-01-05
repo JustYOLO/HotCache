@@ -794,6 +794,11 @@ DEFINE_bool(use_write_cache, true,
             "If true, enable the write cache above the memtable.");
 DEFINE_int64(write_cache_capacity, 64 << 20,
              "Write cache capacity in bytes.");
+DEFINE_int64(write_cache_per_entry_overhead, 0,
+             "Write cache per-entry metadata overhead in bytes. "
+             "If 0, use a computed default estimate.");
+DEFINE_int64(write_cache_wal_max_file_size, 64 << 20,
+             "Write cache WAL max file size in bytes.");
 
 DEFINE_int32(open_files, ROCKSDB_NAMESPACE::Options().max_open_files,
              "Maximum number of files to keep open at the same time"
@@ -3933,6 +3938,7 @@ class Benchmark {
         CacheReportProblems();
       } else if (name == "stats") {
         PrintStats("rocksdb.stats");
+        PrintStats("rocksdb.write-cache-wal-stats");
       } else if (name == "resetstats") {
         ResetStats();
       } else if (name == "verify") {
@@ -4447,6 +4453,10 @@ class Benchmark {
     options.enable_write_cache = FLAGS_use_write_cache;
     options.write_cache_capacity =
         static_cast<size_t>(FLAGS_write_cache_capacity);
+    options.write_cache_per_entry_overhead =
+        static_cast<size_t>(FLAGS_write_cache_per_entry_overhead);
+    options.write_cache_wal_max_file_size =
+        static_cast<size_t>(FLAGS_write_cache_wal_max_file_size);
     options.env = FLAGS_env;
     options.wal_dir = FLAGS_wal_dir;
     options.dump_malloc_stats = FLAGS_dump_malloc_stats;

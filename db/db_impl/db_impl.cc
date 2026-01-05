@@ -56,6 +56,7 @@
 #include "db/version_set.h"
 #include "db/write_batch_internal.h"
 #include "db/write_callback.h"
+#include "db/write_cache_wal.h"
 #include "env/unique_id_gen.h"
 #include "file/file_util.h"
 #include "file/filename.h"
@@ -295,6 +296,9 @@ DBImpl::DBImpl(const DBOptions& options, const std::string& dbname,
       io_tracer_, db_id_, db_session_id_, options.daily_offpeak_time_utc,
       &error_handler_, read_only));
   if (immutable_db_options_.enable_write_cache) {
+    write_cache_wal_ = std::make_unique<WriteCacheWAL>(
+        immutable_db_options_, mutable_db_options_, file_options_, io_tracer_,
+        directories_.GetWalDir(), immutable_db_options_.info_log.get());
     auto eviction_callback = [this](const Slice& key, const Slice& value) {
       if (value.empty()) {
         return;
@@ -321,9 +325,35 @@ DBImpl::DBImpl(const DBOptions& options, const std::string& dbname,
                        s.ToString().c_str());
       }
     };
+    auto record_callback =
+        [this](WriteCache::RecordType type, uint64_t seq, const Slice& key,
+               const Slice* value, const WriteOptions* write_options) {
+          if (!write_cache_wal_) {
+            return;
+          }
+          Status s;
+          if (type == WriteCache::RecordType::kPut && value != nullptr) {
+            write_cache_wal_->IncrementInPlaceUpdateCount();
+            s = write_cache_wal_->LogPut(seq, key, *value, write_options);
+          } else {
+            s = write_cache_wal_->LogDelete(seq, key, write_options);
+          }
+          if (!s.ok()) {
+            ROCKS_LOG_WARN(immutable_db_options_.info_log,
+                           "WriteCache WAL write failed: %s",
+                           s.ToString().c_str());
+          }
+        };
+    auto oldest_seq_callback = [this](uint64_t oldest_live_seq) {
+      if (write_cache_wal_) {
+        write_cache_wal_->UpdateOldestLiveSeq(oldest_live_seq);
+      }
+    };
     write_cache_ = std::make_unique<WriteCache>(
         immutable_db_options_.write_cache_capacity,
-        std::move(eviction_callback));
+        std::move(eviction_callback),
+        immutable_db_options_.write_cache_per_entry_overhead,
+        std::move(record_callback), std::move(oldest_seq_callback));
   }
   column_family_memtables_.reset(
       new ColumnFamilyMemTablesImpl(versions_->GetColumnFamilySet()));
@@ -4655,6 +4685,15 @@ bool DBImpl::GetPropertyHandleOptionsStatistics(std::string* value) {
     return false;
   }
   *value = statistics->ToString();
+  return true;
+}
+
+bool DBImpl::GetPropertyHandleWriteCacheWALStats(std::string* value) {
+  assert(value != nullptr);
+  if (!write_cache_wal_) {
+    return false;
+  }
+  write_cache_wal_->GetStatsString(value);
   return true;
 }
 

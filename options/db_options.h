@@ -112,6 +112,8 @@ struct ImmutableDBOptions {
   bool enable_memtable_logging;
   bool enable_write_cache;
   size_t write_cache_capacity;
+  size_t write_cache_per_entry_overhead;
+  size_t write_cache_wal_max_file_size;
 
   // Beginning convenience/helper objects that are not part of the base
   // DBOptions

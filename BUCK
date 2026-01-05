@@ -108,6 +108,7 @@ cpp_library_wrapper(name="rocksdb_lib", srcs=[
         "db/wide/wide_column_serialization.cc",
         "db/wide/wide_columns.cc",
         "db/wide/wide_columns_helper.cc",
+        "db/write_cache_wal.cc",
         "db/write_batch.cc",
         "db/write_batch_base.cc",
         "db/write_controller.cc",

@@ -1,6 +1,7 @@
 #include "db/write_cache.h"
 
 #include <algorithm> // Required for std::min_element, etc.
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -9,9 +10,23 @@
 namespace ROCKSDB_NAMESPACE {
 
 WriteCache::WriteCache(size_t capacity_bytes,
-                       EvictionCallback eviction_callback)
+                       EvictionCallback eviction_callback,
+                       size_t per_entry_overhead_bytes,
+                       RecordCallback record_callback,
+                       OldestSeqCallback oldest_seq_callback)
     : capacity_bytes_(capacity_bytes),
-      eviction_callback_(std::move(eviction_callback)) {
+      per_entry_overhead_bytes_(per_entry_overhead_bytes),
+      eviction_callback_(std::move(eviction_callback)),
+      record_callback_(std::move(record_callback)),
+      oldest_seq_callback_(std::move(oldest_seq_callback)) {
+  if (capacity_bytes_ <= kGlobalOverheadBytes) {
+    capacity_bytes_ = 0;
+    return;
+  }
+  if (per_entry_overhead_bytes_ == 0) {
+    per_entry_overhead_bytes_ = DefaultPerEntryOverheadBytes();
+  }
+  RecomputeMetadataBytesLocked();
 }
 
 WriteCache::~WriteCache() {
@@ -47,6 +62,9 @@ bool WriteCache::EvictLocked(EvictedEntry* evicted) {
   
   auto cache_it = cache_.find(key_to_evict);
   if (cache_it != cache_.end()) {
+    if (cache_it->second.seq > 0) {
+      RemoveLiveSeqLocked(cache_it->second.seq);
+    }
     if (evicted && !cache_it->second.value.empty()) {
       evicted->key = cache_it->first;
       evicted->value = cache_it->second.value;
@@ -61,6 +79,7 @@ bool WriteCache::EvictLocked(EvictedEntry* evicted) {
   if (lfu_list.empty()) {
     freq_lists_.erase(freq_lists_.begin());
   }
+  RecomputeMetadataBytesLocked();
   return true;
 }
 
@@ -69,9 +88,61 @@ size_t WriteCache::EntryCharge(const std::string& key,
   return key.size() + entry.value.size();
 }
 
-bool WriteCache::Put(const Slice& key, const Slice& value) {
+size_t WriteCache::DefaultPerEntryOverheadBytes() {
+  return sizeof(CacheEntry) + sizeof(std::string) +
+         sizeof(std::list<std::string>::iterator);
+}
+
+size_t WriteCache::ComputeMetadataBytes() const {
+  size_t bytes = kGlobalOverheadBytes;
+  bytes += cache_.bucket_count() * sizeof(void*);
+  bytes += cache_.size() *
+           (sizeof(std::pair<const std::string, CacheEntry>) +
+            2 * sizeof(void*));
+  bytes += freq_lists_.size() *
+           (sizeof(std::pair<const uint64_t, std::list<std::string>>) +
+            2 * sizeof(void*));
+  bytes += cache_.size() *
+           (sizeof(std::list<std::string>::value_type) + 2 * sizeof(void*));
+  bytes += cache_.size() * per_entry_overhead_bytes_;
+  return bytes;
+}
+
+void WriteCache::RecomputeMetadataBytesLocked() {
+  metadata_bytes_ = ComputeMetadataBytes();
+}
+
+void WriteCache::RemoveLiveSeqLocked(uint64_t seq) {
+  if (seq == 0) {
+    return;
+  }
+  auto it = live_seqs_.find(seq);
+  if (it != live_seqs_.end()) {
+    live_seqs_.erase(it);
+  }
+}
+
+void WriteCache::AddLiveSeqLocked(uint64_t seq) {
+  if (seq == 0) {
+    return;
+  }
+  live_seqs_.insert(seq);
+}
+
+uint64_t WriteCache::CurrentOldestLiveSeqLocked() const {
+  if (live_seqs_.empty()) {
+    return 0;
+  }
+  return *live_seqs_.begin();
+}
+
+bool WriteCache::Put(const Slice& key, const Slice& value,
+                     const WriteOptions& write_options) {
   std::vector<EvictedEntry> evicted_entries;
+  std::vector<std::tuple<RecordType, uint64_t, std::string, std::string>>
+      records;
   bool updated = false;
+  uint64_t new_oldest_seq = 0;
   {
     MutexLock lock(&mutex_);
     if (capacity_bytes_ == 0) {
@@ -89,22 +160,50 @@ bool WriteCache::Put(const Slice& key, const Slice& value) {
         current_bytes_ -= (old_charge - new_charge);
       }
       Touch(it);
-      while (current_bytes_ > capacity_bytes_ && !cache_.empty()) {
+      RemoveLiveSeqLocked(it->second.seq);
+      it->second.seq = next_seq_++;
+      AddLiveSeqLocked(it->second.seq);
+      records.emplace_back(RecordType::kPut, it->second.seq, it->first,
+                           it->second.value);
+      RecomputeMetadataBytesLocked();
+      while (TotalBytes() > capacity_bytes_ && !cache_.empty()) {
         EvictedEntry evicted;
         if (!EvictLocked(&evicted)) {
           break;
         }
         if (evicted.has_value) {
+          records.emplace_back(RecordType::kDelete, next_seq_++, evicted.key,
+                               std::string());
           evicted_entries.push_back(std::move(evicted));
         }
       }
+      new_oldest_seq = CurrentOldestLiveSeqLocked();
       updated = true;
+    }
+  }
+  if (updated && record_callback_) {
+    for (const auto& record : records) {
+      const RecordType type = std::get<0>(record);
+      const uint64_t seq = std::get<1>(record);
+      const std::string& record_key = std::get<2>(record);
+      const std::string& record_value = std::get<3>(record);
+      if (type == RecordType::kPut) {
+        Slice value_slice(record_value);
+        record_callback_(type, seq, Slice(record_key), &value_slice,
+                         &write_options);
+      } else {
+        record_callback_(type, seq, Slice(record_key), nullptr, nullptr);
+      }
     }
   }
   if (updated && eviction_callback_) {
     for (const auto& evicted : evicted_entries) {
       eviction_callback_(Slice(evicted.key), Slice(evicted.value));
     }
+  }
+  if (updated && oldest_seq_callback_ && new_oldest_seq != oldest_live_seq_) {
+    oldest_live_seq_ = new_oldest_seq;
+    oldest_seq_callback_(oldest_live_seq_);
   }
   return updated;
 }
@@ -122,6 +221,9 @@ bool WriteCache::Get(const Slice& key, std::string* value) {
 
 void WriteCache::Update(const Slice& key, uint64_t count) {
   std::vector<EvictedEntry> evicted_entries;
+  std::vector<std::tuple<RecordType, uint64_t, std::string, std::string>>
+      records;
+  uint64_t new_oldest_seq = 0;
   {
     MutexLock lock(&mutex_);
     if (capacity_bytes_ == 0) {
@@ -151,25 +253,41 @@ void WriteCache::Update(const Slice& key, uint64_t count) {
     if (entry_charge > capacity_bytes_) {
       return;
     }
-    while (current_bytes_ + entry_charge > capacity_bytes_ &&
-           !cache_.empty()) {
+    freq_lists_[new_freq].push_front(key_str);
+    current_bytes_ += entry_charge;
+    cache_.emplace(std::move(key_str),
+                   CacheEntry{"", new_freq, 0,
+                              freq_lists_[new_freq].begin()});
+    RecomputeMetadataBytesLocked();
+    while (TotalBytes() > capacity_bytes_ && !cache_.empty()) {
       EvictedEntry evicted;
       if (!EvictLocked(&evicted)) {
         break;
       }
       if (evicted.has_value) {
+        records.emplace_back(RecordType::kDelete, next_seq_++, evicted.key,
+                             std::string());
         evicted_entries.push_back(std::move(evicted));
       }
     }
-    freq_lists_[new_freq].push_front(key_str);
-    current_bytes_ += entry_charge;
-    cache_.emplace(std::move(key_str),
-                   CacheEntry{"", new_freq, freq_lists_[new_freq].begin()});
+    new_oldest_seq = CurrentOldestLiveSeqLocked();
+  }
+  if (record_callback_) {
+    for (const auto& record : records) {
+      const RecordType type = std::get<0>(record);
+      const uint64_t seq = std::get<1>(record);
+      const std::string& record_key = std::get<2>(record);
+      record_callback_(type, seq, Slice(record_key), nullptr, nullptr);
+    }
   }
   if (eviction_callback_) {
     for (const auto& evicted : evicted_entries) {
       eviction_callback_(Slice(evicted.key), Slice(evicted.value));
     }
+  }
+  if (oldest_seq_callback_ && new_oldest_seq != oldest_live_seq_) {
+    oldest_live_seq_ = new_oldest_seq;
+    oldest_seq_callback_(oldest_live_seq_);
   }
 }
 

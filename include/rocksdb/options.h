@@ -545,6 +545,13 @@ struct DBOptions {
   // Write cache capacity in bytes.
   // Default: 64MB.
   size_t write_cache_capacity = 64 << 20;
+  // Per-entry metadata overhead estimate in bytes. If 0, use the default
+  // computed estimate based on data structure sizes.
+  // Default: 0.
+  size_t write_cache_per_entry_overhead = 0;
+  // Write cache WAL max file size in bytes. If 0, use the default 64MB.
+  // Default: 64MB.
+  size_t write_cache_wal_max_file_size = 64 << 20;
 
   // The function recovers options to the option as in version 4.6.
   // NOT MAINTAINED: This function has not been and is not maintained.

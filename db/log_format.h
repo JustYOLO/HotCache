@@ -46,6 +46,7 @@ enum RecordType : uint8_t {
 constexpr uint8_t kRecordTypeSafeIgnoreMask = 1 << 7;
 constexpr uint8_t kMaxRecordType = kRecyclableUserDefinedTimestampSizeType;
 
+// lee: default block size for log files
 constexpr unsigned int kBlockSize = 32768;
 
 // Header is checksum (4 bytes), length (2 bytes), type (1 byte)

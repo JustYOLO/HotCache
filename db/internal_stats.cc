@@ -435,6 +435,8 @@ const std::string DB::Properties::kBlobCacheUsage =
     rocksdb_prefix + blob_cache_usage;
 const std::string DB::Properties::kBlobCachePinnedUsage =
     rocksdb_prefix + blob_cache_pinned_usage;
+const std::string DB::Properties::kWriteCacheWALStats =
+    rocksdb_prefix + "write-cache-wal-stats";
 
 const std::string InternalStats::kPeriodicCFStats =
     DB::Properties::kCFStats + ".periodic";
@@ -624,6 +626,9 @@ const UnorderedMap<std::string, DBPropertyInfo>
         {DB::Properties::kBlobCachePinnedUsage,
          {false, nullptr, &InternalStats::HandleBlobCachePinnedUsage, nullptr,
           nullptr}},
+        {DB::Properties::kWriteCacheWALStats,
+         {true, nullptr, nullptr, nullptr,
+          &DBImpl::GetPropertyHandleWriteCacheWALStats}},
 };
 
 InternalStats::InternalStats(int num_levels, SystemClock* clock,

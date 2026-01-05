@@ -85,6 +85,7 @@ class Version;
 class VersionEdit;
 class VersionSet;
 class WriteCallback;
+class WriteCacheWAL;
 struct JobContext;
 struct ExternalSstFileInfo;
 struct MemTableInfo;
@@ -1359,6 +1360,7 @@ class DBImpl : public DB {
   std::unique_ptr<VersionSet> versions_;
   // lee: adding write cache field
   std::unique_ptr<WriteCache> write_cache_;
+  std::unique_ptr<WriteCacheWAL> write_cache_wal_;
   // Flag to check whether we allocated and own the info log file
   bool own_info_log_;
   Status init_logger_creation_s_;
@@ -2525,6 +2527,7 @@ class DBImpl : public DB {
                               const DBPropertyInfo& property_info,
                               bool is_locked, uint64_t* value);
   bool GetPropertyHandleOptionsStatistics(std::string* value);
+  bool GetPropertyHandleWriteCacheWALStats(std::string* value);
 
   bool HasPendingManualCompaction();
   bool HasExclusiveManualCompaction();

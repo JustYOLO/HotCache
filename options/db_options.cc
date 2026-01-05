@@ -322,6 +322,14 @@ static std::unordered_map<std::string, OptionTypeInfo>
          {offsetof(struct ImmutableDBOptions, write_cache_capacity),
           OptionType::kSizeT, OptionVerificationType::kNormal,
           OptionTypeFlags::kNone}},
+        {"write_cache_per_entry_overhead",
+         {offsetof(struct ImmutableDBOptions, write_cache_per_entry_overhead),
+          OptionType::kSizeT, OptionVerificationType::kNormal,
+          OptionTypeFlags::kNone}},
+        {"write_cache_wal_max_file_size",
+         {offsetof(struct ImmutableDBOptions, write_cache_wal_max_file_size),
+          OptionType::kSizeT, OptionVerificationType::kNormal,
+          OptionTypeFlags::kNone}},
         {"fail_if_options_file_error",
          {offsetof(struct ImmutableDBOptions, fail_if_options_file_error),
           OptionType::kBoolean, OptionVerificationType::kNormal,
@@ -809,7 +817,9 @@ ImmutableDBOptions::ImmutableDBOptions(const DBOptions& options)
       wal_write_temperature(options.wal_write_temperature),
       enable_memtable_logging(options.enable_memtable_logging),
       enable_write_cache(options.enable_write_cache),
-      write_cache_capacity(options.write_cache_capacity) {
+      write_cache_capacity(options.write_cache_capacity),
+      write_cache_per_entry_overhead(options.write_cache_per_entry_overhead),
+      write_cache_wal_max_file_size(options.write_cache_wal_max_file_size) {
   fs = env->GetFileSystem();
   clock = env->GetSystemClock().get();
   logger = info_log.get();
@@ -972,6 +982,14 @@ void ImmutableDBOptions::Dump(Logger* log) const {
   ROCKS_LOG_HEADER(
       log, "                Options.write_cache_capacity: %" ROCKSDB_PRIszt,
       write_cache_capacity);
+  ROCKS_LOG_HEADER(
+      log,
+      "      Options.write_cache_per_entry_overhead: %" ROCKSDB_PRIszt,
+      write_cache_per_entry_overhead);
+  ROCKS_LOG_HEADER(
+      log,
+      "      Options.write_cache_wal_max_file_size: %" ROCKSDB_PRIszt,
+      write_cache_wal_max_file_size);
   ROCKS_LOG_HEADER(log, "                Options.write_dbid_to_manifest: %d",
                    write_dbid_to_manifest);
   ROCKS_LOG_HEADER(log, "                Options.write_identity_file: %d",
