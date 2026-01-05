@@ -110,6 +110,8 @@ struct ImmutableDBOptions {
 
   // Lee: memtable logging flag
   bool enable_memtable_logging;
+  bool enable_write_cache;
+  size_t write_cache_capacity;
 
   // Beginning convenience/helper objects that are not part of the base
   // DBOptions

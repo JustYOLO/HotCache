@@ -89,6 +89,7 @@
 #include "rocksdb/table.h"
 #include "rocksdb/version.h"
 #include "rocksdb/write_buffer_manager.h"
+#include "rocksdb/write_batch.h"
 #include "table/block_based/block.h"
 #include "table/block_based/block_based_table_factory.h"
 #include "table/get_context.h"
@@ -293,7 +294,37 @@ DBImpl::DBImpl(const DBOptions& options, const std::string& dbname,
       write_buffer_manager_, &write_controller_, &block_cache_tracer_,
       io_tracer_, db_id_, db_session_id_, options.daily_offpeak_time_utc,
       &error_handler_, read_only));
-  write_cache_ = std::make_unique<WriteCache>();
+  if (immutable_db_options_.enable_write_cache) {
+    auto eviction_callback = [this](const Slice& key, const Slice& value) {
+      if (value.empty()) {
+        return;
+      }
+      WriteOptions write_options;
+      WriteBatch batch(key.size() + value.size() + 24, 0 /* max_bytes */,
+                       write_options.protection_bytes_per_key,
+                       0 /* default_cf_ts_sz */);
+      ColumnFamilyHandle* cfh = DefaultColumnFamily();
+      if (!cfh) {
+        return;
+      }
+      Status s = batch.Put(cfh, key, value);
+      if (!s.ok()) {
+        ROCKS_LOG_WARN(immutable_db_options_.info_log,
+                       "WriteCache eviction batch failed: %s",
+                       s.ToString().c_str());
+        return;
+      }
+      s = Write(write_options, &batch);
+      if (!s.ok()) {
+        ROCKS_LOG_WARN(immutable_db_options_.info_log,
+                       "WriteCache eviction write failed: %s",
+                       s.ToString().c_str());
+      }
+    };
+    write_cache_ = std::make_unique<WriteCache>(
+        immutable_db_options_.write_cache_capacity,
+        std::move(eviction_callback));
+  }
   column_family_memtables_.reset(
       new ColumnFamilyMemTablesImpl(versions_->GetColumnFamilySet()));
 

@@ -539,6 +539,12 @@ struct DBOptions {
   // key entries before flushing the immutable memtable to SST.
   // Default: false (no extra logging; upstream behavior).
   bool enable_memtable_logging = false;
+  // If true, enable the write cache that sits above the memtable.
+  // Default: true.
+  bool enable_write_cache = true;
+  // Write cache capacity in bytes.
+  // Default: 64MB.
+  size_t write_cache_capacity = 64 << 20;
 
   // The function recovers options to the option as in version 4.6.
   // NOT MAINTAINED: This function has not been and is not maintained.

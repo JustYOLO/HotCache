@@ -790,6 +790,10 @@ DEFINE_int64(compressed_cache_size, -1,
 DEFINE_int64(row_cache_size, 0,
              "Number of bytes to use as a cache of individual rows"
              " (0 = disabled).");
+DEFINE_bool(use_write_cache, true,
+            "If true, enable the write cache above the memtable.");
+DEFINE_int64(write_cache_capacity, 64 << 20,
+             "Write cache capacity in bytes.");
 
 DEFINE_int32(open_files, ROCKSDB_NAMESPACE::Options().max_open_files,
              "Maximum number of files to keep open at the same time"
@@ -4440,6 +4444,9 @@ class Benchmark {
     assert(db_.db == nullptr);
 
     options.enable_memtable_logging = FLAGS_enable_memtable_logging;
+    options.enable_write_cache = FLAGS_use_write_cache;
+    options.write_cache_capacity =
+        static_cast<size_t>(FLAGS_write_cache_capacity);
     options.env = FLAGS_env;
     options.wal_dir = FLAGS_wal_dir;
     options.dump_malloc_stats = FLAGS_dump_malloc_stats;

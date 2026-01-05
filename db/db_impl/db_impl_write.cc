@@ -27,8 +27,7 @@ Status DBImpl::Put(const WriteOptions& o, ColumnFamilyHandle* column_family,
     return s;
   }
 
-  assert(write_cache_);
-  if (write_cache_->Put(key, val)) {
+  if (write_cache_ && write_cache_->Put(key, val)) {
     return Status::OK();
   }
 
