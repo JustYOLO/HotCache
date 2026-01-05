@@ -36,6 +36,7 @@ class TableBuilder;
 class WritableFileWriter;
 class InternalStats;
 class BlobFileCompletionCallback;
+class WriteCache;
 
 // Convenience function for NewTableBuilder on the embedded table_factory.
 TableBuilder* NewTableBuilder(const TableBuilderOptions& tboptions,
@@ -71,6 +72,7 @@ Status BuildTable(
     BlobFileCompletionCallback* blob_callback = nullptr,
     Version* version = nullptr, uint64_t* num_input_entries = nullptr,
     uint64_t* memtable_payload_bytes = nullptr,
-    uint64_t* memtable_garbage_bytes = nullptr);
+    uint64_t* memtable_garbage_bytes = nullptr,
+    WriteCache* write_cache = nullptr);
 
 }  // namespace ROCKSDB_NAMESPACE

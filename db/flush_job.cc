@@ -95,7 +95,8 @@ FlushJob::FlushJob(
     InstrumentedMutex* db_mutex, std::atomic<bool>* shutting_down,
     std::vector<SequenceNumber> existing_snapshots,
     SequenceNumber earliest_write_conflict_snapshot,
-    SnapshotChecker* snapshot_checker, JobContext* job_context,
+    SnapshotChecker* snapshot_checker, WriteCache* write_cache,
+    JobContext* job_context,
     FlushReason flush_reason, LogBuffer* log_buffer, FSDirectory* db_directory,
     FSDirectory* output_file_directory, CompressionType output_compression,
     Statistics* stats, EventLogger* event_logger, bool measure_io_stats,
@@ -140,7 +141,8 @@ FlushJob::FlushJob(
       clock_(db_options_.clock),
       full_history_ts_low_(std::move(full_history_ts_low)),
       blob_callback_(blob_callback),
-      seqno_to_time_mapping_(std::move(seqno_to_time_mapping)) {
+      seqno_to_time_mapping_(std::move(seqno_to_time_mapping)),
+      write_cache_(write_cache) {
   // Update the thread status to indicate flush.
   ReportStartedFlush();
   TEST_SYNC_POINT("FlushJob::FlushJob()");
@@ -521,7 +523,8 @@ Status FlushJob::MemPurge() {
         /*manual_compaction_canceled=*/kManualCompactionCanceledFalse,
         false /* must_count_input_entries */,
         /*compaction=*/nullptr, compaction_filter.get(),
-        /*shutting_down=*/nullptr, ioptions->info_log, full_history_ts_low);
+        /*shutting_down=*/nullptr, ioptions->info_log, full_history_ts_low,
+        kMaxSequenceNumber, kMaxSequenceNumber, write_cache_);
 
     // Set earliest sequence number in the new memtable
     // to be equal to the earliest sequence number of the
@@ -1150,7 +1153,7 @@ Status FlushJob::WriteLevel0Table() {
           BlobFileCreationReason::kFlush, seqno_to_time_mapping_.get(),
           event_logger_, job_context_->job_id, &table_properties_, write_hint,
           full_history_ts_low, blob_callback_, base_, &num_input_entries,
-          &memtable_payload_bytes, &memtable_garbage_bytes);
+          &memtable_payload_bytes, &memtable_garbage_bytes, write_cache_);
       TEST_SYNC_POINT_CALLBACK("FlushJob::WriteLevel0Table:s", &s);
       // TODO: Cleanup io_status in BuildTable and table builders
       assert(!s.ok() || io_s.ok());

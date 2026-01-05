@@ -104,6 +104,28 @@ TEST_F(DBBasicTest, OpenWhenOpen) {
   delete db2;
 }
 
+TEST_F(DBBasicTest, WriteCacheGetPut) {
+  Options options = CurrentOptions();
+  options.create_if_missing = true;
+  Reopen(options);
+
+  ASSERT_OK(Put("k1", "v1"));
+  ASSERT_OK(Put("k1", "v1b"));
+  ASSERT_OK(Flush());
+
+  const SequenceNumber seq_before = dbfull()->GetLatestSequenceNumber();
+  ASSERT_OK(Put("k1", "v2"));
+  const SequenceNumber seq_after = dbfull()->GetLatestSequenceNumber();
+  ASSERT_EQ(seq_before, seq_after);
+  ASSERT_EQ("v2", Get("k1"));
+
+  const SequenceNumber seq_before_miss = dbfull()->GetLatestSequenceNumber();
+  ASSERT_OK(Put("k2", "v1"));
+  const SequenceNumber seq_after_miss = dbfull()->GetLatestSequenceNumber();
+  ASSERT_GT(seq_after_miss, seq_before_miss);
+  ASSERT_EQ("v1", Get("k2"));
+}
+
 TEST_F(DBBasicTest, EnableDirectIOWithZeroBuf) {
   if (!IsDirectIOSupported()) {
     ROCKSDB_GTEST_BYPASS("Direct IO not supported");

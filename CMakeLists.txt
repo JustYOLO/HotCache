@@ -744,6 +744,7 @@ set(SOURCES
         db/wide/wide_columns_helper.cc
         db/write_batch.cc
         db/write_batch_base.cc
+        db/write_cache.cc
         db/write_controller.cc
         db/write_stall_stats.cc
         db/write_thread.cc

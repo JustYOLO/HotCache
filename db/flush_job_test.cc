@@ -414,7 +414,7 @@ TEST_F(FlushJobTest, FlushMemtablesMultipleColumnFamilies) {
         dbname_, cfd, db_options_, *cfd->GetLatestMutableCFOptions(),
         memtable_ids[k], env_options_, versions_.get(), &mutex_,
         &shutting_down_, snapshot_seqs, kMaxSequenceNumber, snapshot_checker,
-        &job_context, FlushReason::kTest, nullptr, nullptr, nullptr,
+        nullptr, &job_context, FlushReason::kTest, nullptr, nullptr, nullptr,
         kNoCompression, db_options_.statistics.get(), &event_logger, true,
         false /* sync_output_directory */, false /* write_manifest */,
         Env::Priority::USER, nullptr /*IOTracer*/,

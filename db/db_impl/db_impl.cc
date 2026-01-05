@@ -293,6 +293,7 @@ DBImpl::DBImpl(const DBOptions& options, const std::string& dbname,
       write_buffer_manager_, &write_controller_, &block_cache_tracer_,
       io_tracer_, db_id_, db_session_id_, options.daily_offpeak_time_utc,
       &error_handler_, read_only));
+  write_cache_ = std::make_unique<WriteCache>();
   column_family_memtables_.reset(
       new ColumnFamilyMemTablesImpl(versions_->GetColumnFamilySet()));
 
@@ -2340,6 +2341,14 @@ Status DBImpl::GetImpl(const ReadOptions& read_options, const Slice& key,
     const Status s = FailIfCfHasTs(get_impl_options.column_family);
     if (!s.ok()) {
       return s;
+    }
+  }
+
+  if (get_impl_options.value && !read_options.timestamp && write_cache_) {
+    std::string cached_value;
+    if (write_cache_->Get(key, &cached_value)) {
+      get_impl_options.value->PinSelf(Slice(cached_value));
+      return Status::OK();
     }
   }
 

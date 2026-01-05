@@ -8,7 +8,9 @@
 #include <cinttypes>
 #include <cstdint>
 #include <deque>
+#include <memory>
 #include <string>
+#include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
@@ -26,6 +28,7 @@ namespace ROCKSDB_NAMESPACE {
 class BlobFileBuilder;
 class BlobFetcher;
 class PrefetchBufferCollection;
+class WriteCache;
 
 // A wrapper of internal iterator whose purpose is to count how
 // many entries there are in the iterator.
@@ -218,9 +221,11 @@ class CompactionIterator {
       const std::shared_ptr<Logger> info_log = nullptr,
       const std::string* full_history_ts_low = nullptr,
       const SequenceNumber preserve_time_min_seqno = kMaxSequenceNumber,
-      const SequenceNumber preclude_last_level_min_seqno = kMaxSequenceNumber);
+      const SequenceNumber preclude_last_level_min_seqno = kMaxSequenceNumber,
+      WriteCache* write_cache = nullptr);
 
   // Constructor with custom CompactionProxy, used for tests.
+  // lee: test? need to delete writecache?
   CompactionIterator(
       InternalIterator* input, const Comparator* cmp, MergeHelper* merge_helper,
       SequenceNumber last_sequence, std::vector<SequenceNumber>* snapshots,
@@ -239,7 +244,8 @@ class CompactionIterator {
       const std::shared_ptr<Logger> info_log = nullptr,
       const std::string* full_history_ts_low = nullptr,
       const SequenceNumber preserve_time_min_seqno = kMaxSequenceNumber,
-      const SequenceNumber preclude_last_level_min_seqno = kMaxSequenceNumber);
+      const SequenceNumber preclude_last_level_min_seqno = kMaxSequenceNumber,
+      WriteCache* write_cache = nullptr);
 
   ~CompactionIterator();
 
@@ -538,6 +544,11 @@ class CompactionIterator {
   // Stores whether the current compaction iterator output
   // is a range tombstone start key.
   bool is_range_del_{false};
+
+  // Is this compaction part of a flush?
+  bool is_flush_;
+  std::unique_ptr<std::unordered_map<std::string, uint64_t>> duplicate_keys_counts_;
+  WriteCache* write_cache_;
 };
 
 inline bool CompactionIterator::DefinitelyInSnapshot(SequenceNumber seq,

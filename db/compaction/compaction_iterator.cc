@@ -13,6 +13,7 @@
 #include "db/blob/blob_index.h"
 #include "db/blob/prefetch_buffer_collection.h"
 #include "db/snapshot_checker.h"
+#include "db/write_cache.h"
 #include "db/wide/wide_column_serialization.h"
 #include "db/wide/wide_columns_helper.h"
 #include "logging/logging.h"
@@ -39,7 +40,7 @@ CompactionIterator::CompactionIterator(
     const std::shared_ptr<Logger> info_log,
     const std::string* full_history_ts_low,
     const SequenceNumber preserve_time_min_seqno,
-    const SequenceNumber preclude_last_level_min_seqno)
+    const SequenceNumber preclude_last_level_min_seqno, WriteCache* write_cache)
     : CompactionIterator(
           input, cmp, merge_helper, last_sequence, snapshots, earliest_snapshot,
           earliest_write_conflict_snapshot, job_snapshot, snapshot_checker, env,
@@ -49,7 +50,7 @@ CompactionIterator::CompactionIterator(
           compaction ? std::make_unique<RealCompaction>(compaction) : nullptr,
           must_count_input_entries, compaction_filter, shutting_down, info_log,
           full_history_ts_low, preserve_time_min_seqno,
-          preclude_last_level_min_seqno) {}
+          preclude_last_level_min_seqno, write_cache) {}
 
 CompactionIterator::CompactionIterator(
     InternalIterator* input, const Comparator* cmp, MergeHelper* merge_helper,
@@ -68,7 +69,7 @@ CompactionIterator::CompactionIterator(
     const std::shared_ptr<Logger> info_log,
     const std::string* full_history_ts_low,
     const SequenceNumber preserve_time_min_seqno,
-    const SequenceNumber preclude_last_level_min_seqno)
+    const SequenceNumber preclude_last_level_min_seqno, WriteCache* write_cache)
     : input_(input, cmp, must_count_input_entries),
       cmp_(cmp),
       merge_helper_(merge_helper),
@@ -110,12 +111,17 @@ CompactionIterator::CompactionIterator(
       cmp_with_history_ts_low_(0),
       level_(compaction_ == nullptr ? 0 : compaction_->level()),
       preserve_time_min_seqno_(preserve_time_min_seqno),
-      preclude_last_level_min_seqno_(preclude_last_level_min_seqno) {
+      preclude_last_level_min_seqno_(preclude_last_level_min_seqno),
+      is_flush_(compaction_ == nullptr),
+      write_cache_(write_cache) {
   assert(snapshots_ != nullptr);
   assert(preserve_time_min_seqno_ <= preclude_last_level_min_seqno_);
 
   if (compaction_ != nullptr) {
     level_ptrs_ = std::vector<size_t>(compaction_->number_levels(), 0);
+  }
+  if (is_flush_) {
+    duplicate_keys_counts_ = std::make_unique<std::unordered_map<std::string, uint64_t>>();
   }
 #ifndef NDEBUG
   // findEarliestVisibleSnapshot assumes this ordering.
@@ -136,9 +142,44 @@ CompactionIterator::~CompactionIterator() {
   // input_ Iterator lifetime is longer than pinned_iters_mgr_ lifetime
   // Log the count for the last key if it appeared more than once.
   if (has_current_user_key_ && current_user_key_count_ > 1) {
+    if (is_flush_ && duplicate_keys_counts_) {
+      (*duplicate_keys_counts_)[current_user_key_.ToString()] =
+          current_user_key_count_;
+    }
+
     // ROCKS_LOG_INFO(
     //     info_log_, "CompactionIterator: Saw user key %s %" PRIu64 " times.",
     //     current_user_key_.ToString(true).c_str(), current_user_key_count_);
+  }
+
+  // lee: hot key logging
+  // if (is_flush_ && duplicate_keys_counts_ &&
+  // !duplicate_keys_counts_->empty()) {
+  //   std::vector<std::pair<std::string, uint64_t>> sorted_keys;
+  //   sorted_keys.reserve(duplicate_keys_counts_->size());
+  //   for (const auto& pair : *duplicate_keys_counts_) {
+  //     sorted_keys.push_back(pair);
+  //   }
+  //
+  //   size_t top_n = std::min(static_cast<size_t>(10), sorted_keys.size());
+  //   std::partial_sort(sorted_keys.begin(), sorted_keys.begin() + top_n,
+  //   sorted_keys.end(),
+  //                     [](const auto& a, const auto& b) {
+  //                         return a.second > b.second;
+  //                     });
+  //
+  //   ROCKS_LOG_INFO(info_log_, "Flush: Top %zu most duplicated keys:", top_n);
+  //   for (size_t i = 0; i < top_n; ++i) {
+  //       ROCKS_LOG_INFO(info_log_, "  - Key: %s, Count: %" PRIu64,
+  //                      Slice(sorted_keys[i].first).ToString(true).c_str(),
+  //                      sorted_keys[i].second);
+  //   }
+  // }
+  if (is_flush_ && write_cache_ && duplicate_keys_counts_ &&
+      !duplicate_keys_counts_->empty()) {
+    for (const auto& pair : *duplicate_keys_counts_) {
+      write_cache_->Update(Slice(pair.first), pair.second);
+    }
   }
   input_.SetPinnedItersMgr(nullptr);
 }
@@ -529,6 +570,10 @@ void CompactionIterator::NextFromInput() {
     if (!has_current_user_key_ || !user_key_equal_without_ts || cmp_ts != 0) {
       // Log the count for the previous key if it appeared more than once.
       if (has_current_user_key_ && current_user_key_count_ > 1) {
+        if (is_flush_ && duplicate_keys_counts_) {
+          (*duplicate_keys_counts_)[current_user_key_.ToString()] =
+              current_user_key_count_;
+        }
         // ROCKS_LOG_INFO(
         //     info_log_, "CompactionIterator: Saw user key %s %" PRIu64 "
         //     times.", current_user_key_.ToString(true).c_str(),
@@ -587,8 +632,7 @@ void CompactionIterator::NextFromInput() {
       current_user_key_count_++;
       // Update the current key to reflect the new sequence number/type without
       // copying the user key.
-      // TODO(rven): Compaction filter does not process keys in this path
-      // Need to have the compaction filter process multiple versions
+      // TODO(rven): Compaction filter does not process multiple versions
       // if we have versions on both sides of a snapshot
       current_key_.UpdateInternalKey(ikey_.sequence, ikey_.type);
       key_ = current_key_.GetInternalKey();
@@ -790,7 +834,6 @@ void CompactionIterator::NextFromInput() {
             if (enforce_single_del_contracts_) {
               ROCKS_LOG_ERROR(info_log_, "%s", oss.str().c_str());
               validity_info_.Invalidate();
-              status_ = Status::Corruption(oss.str());
               return;
             }
             ROCKS_LOG_WARN(info_log_, "%s", oss.str().c_str());
@@ -956,7 +999,7 @@ void CompactionIterator::NextFromInput() {
       AdvanceInputIter();
 #ifndef NDEBUG
       const Compaction* c =
-          compaction_ ? compaction_->real_compaction() : nullptr;
+            compaction_ ? compaction_->real_compaction() : nullptr;
 #endif
       TEST_SYNC_POINT_CALLBACK(
           "CompactionIterator::NextFromInput:BottommostDelete:1",

@@ -53,6 +53,7 @@ class Version;
 class VersionEdit;
 class VersionSet;
 class Arena;
+class WriteCache;
 
 class FlushJob {
  public:
@@ -65,7 +66,8 @@ class FlushJob {
            InstrumentedMutex* db_mutex, std::atomic<bool>* shutting_down,
            std::vector<SequenceNumber> existing_snapshots,
            SequenceNumber earliest_write_conflict_snapshot,
-           SnapshotChecker* snapshot_checker, JobContext* job_context,
+           SnapshotChecker* snapshot_checker, WriteCache* write_cache,
+           JobContext* job_context,
            FlushReason flush_reason, LogBuffer* log_buffer,
            FSDirectory* db_directory, FSDirectory* output_file_directory,
            CompressionType output_compression, Statistics* stats,
@@ -227,6 +229,7 @@ class FlushJob {
   // Note this is only installed when seqno to time recording feature is
   // enables, so it could be nullptr.
   std::shared_ptr<const SeqnoToTimeMapping> seqno_to_time_mapping_;
+  WriteCache* write_cache_;
 
   // Keeps track of the newest user-defined timestamp for this flush job if
   // `persist_user_defined_timestamps` flag is false.

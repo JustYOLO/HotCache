@@ -15,6 +15,7 @@
 #include <limits>
 #include <list>
 #include <map>
+#include <memory>
 #include <set>
 #include <string>
 #include <unordered_map>
@@ -45,6 +46,7 @@
 #include "db/trim_history_scheduler.h"
 #include "db/version_edit.h"
 #include "db/wal_manager.h"
+#include "db/write_cache.h"
 #include "db/write_controller.h"
 #include "db/write_thread.h"
 #include "logging/event_logger.h"
@@ -1355,6 +1357,8 @@ class DBImpl : public DB {
   // every time the DB is opened
   std::string db_session_id_;
   std::unique_ptr<VersionSet> versions_;
+  // lee: adding write cache field
+  std::unique_ptr<WriteCache> write_cache_;
   // Flag to check whether we allocated and own the info log file
   bool own_info_log_;
   Status init_logger_creation_s_;

@@ -75,7 +75,7 @@ Status BuildTable(
     Env::WriteLifeTimeHint write_hint, const std::string* full_history_ts_low,
     BlobFileCompletionCallback* blob_callback, Version* version,
     uint64_t* num_input_entries, uint64_t* memtable_payload_bytes,
-    uint64_t* memtable_garbage_bytes) {
+    uint64_t* memtable_garbage_bytes, WriteCache* write_cache) {
   assert((tboptions.column_family_id ==
           TablePropertiesCollectorFactory::Context::kUnknownColumnFamily) ==
          tboptions.column_family_name.empty());
@@ -204,7 +204,8 @@ Status BuildTable(
         /*manual_compaction_canceled=*/kManualCompactionCanceledFalse,
         true /* must_count_input_entries */,
         /*compaction=*/nullptr, compaction_filter.get(),
-        /*shutting_down=*/nullptr, db_options.info_log, full_history_ts_low);
+        /*shutting_down=*/nullptr, db_options.info_log, full_history_ts_low,
+        kMaxSequenceNumber, kMaxSequenceNumber, write_cache);
 
     SequenceNumber smallest_preferred_seqno = kMaxSequenceNumber;
     std::string key_after_flush_buf;
