@@ -13,12 +13,14 @@ WriteCache::WriteCache(size_t capacity_bytes,
                        EvictionCallback eviction_callback,
                        size_t per_entry_overhead_bytes,
                        RecordCallback record_callback,
-                       OldestSeqCallback oldest_seq_callback)
+                       OldestSeqCallback oldest_seq_callback,
+                       EvictionStatsCallback eviction_stats_callback)
     : capacity_bytes_(capacity_bytes),
       per_entry_overhead_bytes_(per_entry_overhead_bytes),
       eviction_callback_(std::move(eviction_callback)),
       record_callback_(std::move(record_callback)),
-      oldest_seq_callback_(std::move(oldest_seq_callback)) {
+      oldest_seq_callback_(std::move(oldest_seq_callback)),
+      eviction_stats_callback_(std::move(eviction_stats_callback)) {
   if (capacity_bytes_ <= kGlobalOverheadBytes) {
     capacity_bytes_ = 0;
     return;
@@ -47,6 +49,7 @@ void WriteCache::Touch(typename std::unordered_map<std::string, CacheEntry>::ite
   uint64_t new_freq = ++it->second.frequency;
   freq_lists_[new_freq].push_front(it->first);
   it->second.lfu_iterator = freq_lists_[new_freq].begin();
+  MaybeDecayLocked();
 }
 
 bool WriteCache::EvictLocked(EvictedEntry* evicted) {
@@ -142,6 +145,7 @@ bool WriteCache::Put(const Slice& key, const Slice& value,
   std::vector<std::tuple<RecordType, uint64_t, std::string, std::string>>
       records;
   bool updated = false;
+  uint64_t evicted_count = 0;
   uint64_t new_oldest_seq = 0;
   {
     MutexLock lock(&mutex_);
@@ -171,6 +175,7 @@ bool WriteCache::Put(const Slice& key, const Slice& value,
         if (!EvictLocked(&evicted)) {
           break;
         }
+        ++evicted_count;
         if (evicted.has_value) {
           records.emplace_back(RecordType::kDelete, next_seq_++, evicted.key,
                                std::string());
@@ -201,6 +206,9 @@ bool WriteCache::Put(const Slice& key, const Slice& value,
       eviction_callback_(Slice(evicted.key), Slice(evicted.value));
     }
   }
+  if (updated && eviction_stats_callback_ && evicted_count > 0) {
+    eviction_stats_callback_(evicted_count);
+  }
   if (updated && oldest_seq_callback_ && new_oldest_seq != oldest_live_seq_) {
     oldest_live_seq_ = new_oldest_seq;
     oldest_seq_callback_(oldest_live_seq_);
@@ -223,6 +231,7 @@ void WriteCache::Update(const Slice& key, uint64_t count) {
   std::vector<EvictedEntry> evicted_entries;
   std::vector<std::tuple<RecordType, uint64_t, std::string, std::string>>
       records;
+  uint64_t evicted_count = 0;
   uint64_t new_oldest_seq = 0;
   {
     MutexLock lock(&mutex_);
@@ -243,6 +252,7 @@ void WriteCache::Update(const Slice& key, uint64_t count) {
       std::string key_str_in_list = it->first; // Store to avoid iterator invalidation
       freq_lists_[new_freq].push_front(key_str_in_list);
       it->second.lfu_iterator = freq_lists_[new_freq].begin();
+      MaybeDecayLocked();
       return;
     }
 
@@ -264,6 +274,7 @@ void WriteCache::Update(const Slice& key, uint64_t count) {
       if (!EvictLocked(&evicted)) {
         break;
       }
+      ++evicted_count;
       if (evicted.has_value) {
         records.emplace_back(RecordType::kDelete, next_seq_++, evicted.key,
                              std::string());
@@ -271,6 +282,7 @@ void WriteCache::Update(const Slice& key, uint64_t count) {
       }
     }
     new_oldest_seq = CurrentOldestLiveSeqLocked();
+    MaybeDecayLocked();
   }
   if (record_callback_) {
     for (const auto& record : records) {
@@ -285,9 +297,33 @@ void WriteCache::Update(const Slice& key, uint64_t count) {
       eviction_callback_(Slice(evicted.key), Slice(evicted.value));
     }
   }
+  if (eviction_stats_callback_ && evicted_count > 0) {
+    eviction_stats_callback_(evicted_count);
+  }
   if (oldest_seq_callback_ && new_oldest_seq != oldest_live_seq_) {
     oldest_live_seq_ = new_oldest_seq;
     oldest_seq_callback_(oldest_live_seq_);
+  }
+}
+
+void WriteCache::MaybeDecayLocked() {
+  if (kFrequencyDecayIntervalOps == 0) {
+    return;
+  }
+  ++ops_since_decay_;
+  if (ops_since_decay_ < kFrequencyDecayIntervalOps) {
+    return;
+  }
+  ops_since_decay_ = 0;
+  if (cache_.empty()) {
+    return;
+  }
+  freq_lists_.clear();
+  for (auto& entry_pair : cache_) {
+    auto& entry = entry_pair.second;
+    entry.frequency = std::max<uint64_t>(1, entry.frequency / 2);
+    freq_lists_[entry.frequency].push_front(entry_pair.first);
+    entry.lfu_iterator = freq_lists_[entry.frequency].begin();
   }
 }
 

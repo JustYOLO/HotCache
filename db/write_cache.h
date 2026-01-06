@@ -27,12 +27,14 @@ class WriteCache {
                                             const Slice* value,
                                             const WriteOptions* write_options)>;
   using OldestSeqCallback = std::function<void(uint64_t oldest_live_seq)>;
+  using EvictionStatsCallback = std::function<void(uint64_t evicted_count)>;
 
   explicit WriteCache(size_t capacity_bytes = kDefaultCacheCapacityBytes,
                       EvictionCallback eviction_callback = nullptr,
                       size_t per_entry_overhead_bytes = 0,
                       RecordCallback record_callback = nullptr,
-                      OldestSeqCallback oldest_seq_callback = nullptr);
+                      OldestSeqCallback oldest_seq_callback = nullptr,
+                      EvictionStatsCallback eviction_stats_callback = nullptr);
   ~WriteCache();
 
   bool Put(const Slice& key, const Slice& value,
@@ -61,6 +63,7 @@ class WriteCache {
   };
   constexpr static size_t kDefaultCacheCapacityBytes = 64 << 20;
   constexpr static size_t kGlobalOverheadBytes = 4 << 10;
+  constexpr static uint64_t kFrequencyDecayIntervalOps = 1 << 20;
 
   std::unordered_map<std::string, CacheEntry> cache_;
   // Map from frequency to a list of keys with that frequency
@@ -72,9 +75,11 @@ class WriteCache {
   EvictionCallback eviction_callback_;
   RecordCallback record_callback_;
   OldestSeqCallback oldest_seq_callback_;
+  EvictionStatsCallback eviction_stats_callback_;
   std::multiset<uint64_t> live_seqs_;
   uint64_t oldest_live_seq_ = 0;
   uint64_t next_seq_ = 1;
+  uint64_t ops_since_decay_ = 0;
 
   // Mutex for thread-safe access to the cache.
   port::Mutex mutex_;
@@ -91,6 +96,7 @@ class WriteCache {
   void RemoveLiveSeqLocked(uint64_t seq);
   void AddLiveSeqLocked(uint64_t seq);
   uint64_t CurrentOldestLiveSeqLocked() const;
+  void MaybeDecayLocked();
 };
 
 }  // namespace ROCKSDB_NAMESPACE

@@ -349,11 +349,17 @@ DBImpl::DBImpl(const DBOptions& options, const std::string& dbname,
         write_cache_wal_->UpdateOldestLiveSeq(oldest_live_seq);
       }
     };
+    auto eviction_stats_callback = [this](uint64_t evicted_count) {
+      if (write_cache_wal_) {
+        write_cache_wal_->AddEvictedCount(evicted_count);
+      }
+    };
     write_cache_ = std::make_unique<WriteCache>(
         immutable_db_options_.write_cache_capacity,
         std::move(eviction_callback),
         immutable_db_options_.write_cache_per_entry_overhead,
-        std::move(record_callback), std::move(oldest_seq_callback));
+        std::move(record_callback), std::move(oldest_seq_callback),
+        std::move(eviction_stats_callback));
   }
   column_family_memtables_.reset(
       new ColumnFamilyMemTablesImpl(versions_->GetColumnFamilySet()));
