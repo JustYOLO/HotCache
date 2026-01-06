@@ -222,7 +222,7 @@ class CompactionIterator {
       const std::string* full_history_ts_low = nullptr,
       const SequenceNumber preserve_time_min_seqno = kMaxSequenceNumber,
       const SequenceNumber preclude_last_level_min_seqno = kMaxSequenceNumber,
-      WriteCache* write_cache = nullptr);
+      WriteCache* write_cache = nullptr, bool track_duplicate_keys = false);
 
   // Constructor with custom CompactionProxy, used for tests.
   // lee: test? need to delete writecache?
@@ -245,7 +245,7 @@ class CompactionIterator {
       const std::string* full_history_ts_low = nullptr,
       const SequenceNumber preserve_time_min_seqno = kMaxSequenceNumber,
       const SequenceNumber preclude_last_level_min_seqno = kMaxSequenceNumber,
-      WriteCache* write_cache = nullptr);
+      WriteCache* write_cache = nullptr, bool track_duplicate_keys = false);
 
   ~CompactionIterator();
 
@@ -276,6 +276,7 @@ class CompactionIterator {
   const CompactionIterationStats& iter_stats() const { return iter_stats_; }
   bool HasNumInputEntryScanned() const { return input_.HasNumItered(); }
   uint64_t NumInputEntryScanned() const { return input_.NumItered(); }
+  std::unordered_map<std::string, uint64_t> TakeDuplicateKeysCounts();
   // If the current key should be placed on penultimate level, only valid if
   // per_key_placement is supported
   bool output_to_penultimate_level() const {
@@ -547,6 +548,7 @@ class CompactionIterator {
 
   // Is this compaction part of a flush?
   bool is_flush_;
+  bool track_duplicate_keys_;
   std::unique_ptr<std::unordered_map<std::string, uint64_t>> duplicate_keys_counts_;
   WriteCache* write_cache_;
 };

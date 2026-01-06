@@ -40,7 +40,8 @@ CompactionIterator::CompactionIterator(
     const std::shared_ptr<Logger> info_log,
     const std::string* full_history_ts_low,
     const SequenceNumber preserve_time_min_seqno,
-    const SequenceNumber preclude_last_level_min_seqno, WriteCache* write_cache)
+    const SequenceNumber preclude_last_level_min_seqno, WriteCache* write_cache,
+    bool track_duplicate_keys)
     : CompactionIterator(
           input, cmp, merge_helper, last_sequence, snapshots, earliest_snapshot,
           earliest_write_conflict_snapshot, job_snapshot, snapshot_checker, env,
@@ -50,7 +51,7 @@ CompactionIterator::CompactionIterator(
           compaction ? std::make_unique<RealCompaction>(compaction) : nullptr,
           must_count_input_entries, compaction_filter, shutting_down, info_log,
           full_history_ts_low, preserve_time_min_seqno,
-          preclude_last_level_min_seqno, write_cache) {}
+          preclude_last_level_min_seqno, write_cache, track_duplicate_keys) {}
 
 CompactionIterator::CompactionIterator(
     InternalIterator* input, const Comparator* cmp, MergeHelper* merge_helper,
@@ -69,7 +70,8 @@ CompactionIterator::CompactionIterator(
     const std::shared_ptr<Logger> info_log,
     const std::string* full_history_ts_low,
     const SequenceNumber preserve_time_min_seqno,
-    const SequenceNumber preclude_last_level_min_seqno, WriteCache* write_cache)
+    const SequenceNumber preclude_last_level_min_seqno, WriteCache* write_cache,
+    bool track_duplicate_keys)
     : input_(input, cmp, must_count_input_entries),
       cmp_(cmp),
       merge_helper_(merge_helper),
@@ -113,6 +115,7 @@ CompactionIterator::CompactionIterator(
       preserve_time_min_seqno_(preserve_time_min_seqno),
       preclude_last_level_min_seqno_(preclude_last_level_min_seqno),
       is_flush_(compaction_ == nullptr),
+      track_duplicate_keys_(track_duplicate_keys),
       write_cache_(write_cache) {
   assert(snapshots_ != nullptr);
   assert(preserve_time_min_seqno_ <= preclude_last_level_min_seqno_);
@@ -121,7 +124,11 @@ CompactionIterator::CompactionIterator(
     level_ptrs_ = std::vector<size_t>(compaction_->number_levels(), 0);
   }
   if (is_flush_) {
-    duplicate_keys_counts_ = std::make_unique<std::unordered_map<std::string, uint64_t>>();
+    track_duplicate_keys_ = true;
+  }
+  if (track_duplicate_keys_) {
+    duplicate_keys_counts_ =
+        std::make_unique<std::unordered_map<std::string, uint64_t>>();
   }
 #ifndef NDEBUG
   // findEarliestVisibleSnapshot assumes this ordering.
@@ -141,15 +148,11 @@ CompactionIterator::CompactionIterator(
 CompactionIterator::~CompactionIterator() {
   // input_ Iterator lifetime is longer than pinned_iters_mgr_ lifetime
   // Log the count for the last key if it appeared more than once.
-  if (has_current_user_key_ && current_user_key_count_ > 1) {
-    if (is_flush_ && duplicate_keys_counts_) {
+  if (duplicate_keys_counts_) {
+    if (has_current_user_key_ && current_user_key_count_ > 1) {
       (*duplicate_keys_counts_)[current_user_key_.ToString()] =
           current_user_key_count_;
     }
-
-    // ROCKS_LOG_INFO(
-    //     info_log_, "CompactionIterator: Saw user key %s %" PRIu64 " times.",
-    //     current_user_key_.ToString(true).c_str(), current_user_key_count_);
   }
 
   // lee: hot key logging
@@ -564,22 +567,18 @@ void CompactionIterator::NextFromInput() {
                                : 0;
     }
 
-    // Check whether the user key changed. After this if statement current_key_
-    // is a copy of the current input key (maybe converted to a delete by the
-    // compaction filter). ikey_.user_key is pointing to the copy.
-    if (!has_current_user_key_ || !user_key_equal_without_ts || cmp_ts != 0) {
-      // Log the count for the previous key if it appeared more than once.
+  // Check whether the user key changed. After this if statement current_key_
+  // is a copy of the current input key (maybe converted to a delete by the
+  // compaction filter). ikey_.user_key is pointing to the copy.
+  if (!has_current_user_key_ || !user_key_equal_without_ts || cmp_ts != 0) {
+    // Log the count for the previous key if it appeared more than once.
+    if (duplicate_keys_counts_) {
       if (has_current_user_key_ && current_user_key_count_ > 1) {
-        if (is_flush_ && duplicate_keys_counts_) {
-          (*duplicate_keys_counts_)[current_user_key_.ToString()] =
-              current_user_key_count_;
-        }
-        // ROCKS_LOG_INFO(
-        //     info_log_, "CompactionIterator: Saw user key %s %" PRIu64 "
-        //     times.", current_user_key_.ToString(true).c_str(),
-        //     current_user_key_count_);
+        (*duplicate_keys_counts_)[current_user_key_.ToString()] =
+            current_user_key_count_;
       }
-      current_user_key_count_ = 1;
+    }
+    current_user_key_count_ = 1;
       // First occurrence of this user key
       // Copy key for output
       key_ = current_key_.SetInternalKey(key_, &ikey_);
@@ -1180,6 +1179,21 @@ void CompactionIterator::NextFromInput() {
   if (!input_.Valid() && input_.status().IsCorruption()) {
     status_ = input_.status();
   }
+}
+
+std::unordered_map<std::string, uint64_t>
+CompactionIterator::TakeDuplicateKeysCounts() {
+  std::unordered_map<std::string, uint64_t> counts;
+  if (!duplicate_keys_counts_) {
+    return counts;
+  }
+  if (has_current_user_key_ && current_user_key_count_ > 1) {
+    (*duplicate_keys_counts_)[current_user_key_.ToString()] =
+        current_user_key_count_;
+  }
+  counts = std::move(*duplicate_keys_counts_);
+  duplicate_keys_counts_.reset();
+  return counts;
 }
 
 bool CompactionIterator::ExtractLargeValueIfNeededImpl() {

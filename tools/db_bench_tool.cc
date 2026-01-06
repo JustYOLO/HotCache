@@ -790,7 +790,7 @@ DEFINE_int64(compressed_cache_size, -1,
 DEFINE_int64(row_cache_size, 0,
              "Number of bytes to use as a cache of individual rows"
              " (0 = disabled).");
-DEFINE_bool(use_write_cache, true,
+DEFINE_bool(use_write_cache, false,
             "If true, enable the write cache above the memtable.");
 DEFINE_string(write_cache_policy, "lfu",
               "Write cache eviction policy: lfu or lru.");
@@ -1225,6 +1225,9 @@ DEFINE_bool(report_bg_io_stats, false,
 
 DEFINE_bool(use_stderr_info_logger, false,
             "Write info logs to stderr instead of to LOG file. ");
+
+DEFINE_bool(compaction_duplicate_key_logging, false,
+            "If true, log duplicate user keys encountered during compaction.");
 
 DEFINE_string(trace_file, "", "Trace workload to a file. ");
 
@@ -4463,6 +4466,8 @@ class Benchmark {
     assert(db_.db == nullptr);
 
     options.enable_memtable_logging = FLAGS_enable_memtable_logging;
+    options.enable_compaction_duplicate_key_logging =
+        FLAGS_compaction_duplicate_key_logging;
     options.enable_write_cache = FLAGS_use_write_cache;
     options.write_cache_policy =
         StringToWriteCachePolicy(FLAGS_write_cache_policy.c_str());

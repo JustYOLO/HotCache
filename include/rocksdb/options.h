@@ -542,8 +542,8 @@ struct DBOptions {
   // Default: false (no extra logging; upstream behavior).
   bool enable_memtable_logging = false;
   // If true, enable the write cache that sits above the memtable.
-  // Default: true.
-  bool enable_write_cache = true;
+  // Default: false.
+  bool enable_write_cache = false;
   // Write cache eviction policy.
   // Default: kLFU.
   WriteCachePolicy write_cache_policy = WriteCachePolicy::kLFU;
@@ -638,6 +638,10 @@ struct DBOptions {
   //
   // Default: true
   bool compaction_verify_record_count = true;
+
+  // If true, log duplicate user keys encountered during compaction, with counts
+  // and compaction level summary. Default: false.
+  bool enable_compaction_duplicate_key_logging = false;
 
   // If true, the log numbers and sizes of the synced WALs are tracked
   // in MANIFEST. During DB recovery, if a synced WAL is missing

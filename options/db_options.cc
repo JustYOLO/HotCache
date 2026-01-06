@@ -326,6 +326,11 @@ static std::unordered_map<std::string, OptionTypeInfo>
          {offsetof(struct ImmutableDBOptions, enable_write_cache),
           OptionType::kBoolean, OptionVerificationType::kNormal,
           OptionTypeFlags::kNone}},
+        {"enable_compaction_duplicate_key_logging",
+         {offsetof(struct ImmutableDBOptions,
+                   enable_compaction_duplicate_key_logging),
+          OptionType::kBoolean, OptionVerificationType::kNormal,
+          OptionTypeFlags::kNone}},
         {"write_cache_policy",
          OptionTypeInfo::Enum<WriteCachePolicy>(
              offsetof(struct ImmutableDBOptions, write_cache_policy),
@@ -828,6 +833,8 @@ ImmutableDBOptions::ImmutableDBOptions(const DBOptions& options)
       metadata_write_temperature(options.metadata_write_temperature),
       wal_write_temperature(options.wal_write_temperature),
       enable_memtable_logging(options.enable_memtable_logging),
+      enable_compaction_duplicate_key_logging(
+          options.enable_compaction_duplicate_key_logging),
       enable_write_cache(options.enable_write_cache),
       write_cache_policy(options.write_cache_policy),
       write_cache_capacity(options.write_cache_capacity),
@@ -992,6 +999,9 @@ void ImmutableDBOptions::Dump(Logger* log) const {
                    persist_stats_to_disk);
   ROCKS_LOG_HEADER(log, "                Options.enable_write_cache: %d",
                    enable_write_cache);
+  ROCKS_LOG_HEADER(
+      log, "Options.enable_compaction_duplicate_key_logging: %d",
+      enable_compaction_duplicate_key_logging);
   ROCKS_LOG_HEADER(
       log, "                Options.write_cache_policy: %s",
       write_cache_policy == WriteCachePolicy::kLRU ? "lru" : "lfu");

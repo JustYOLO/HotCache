@@ -14,6 +14,7 @@
 #include <limits>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -294,6 +295,10 @@ class CompactionJob {
 
   void NotifyOnSubcompactionCompleted(SubcompactionState* sub_compact);
 
+  void MergeDuplicateKeyCounts(
+      std::unordered_map<std::string, uint64_t>&& counts);
+  void LogCompactionDuplicateKeys();
+
   uint32_t job_id_;
 
   // DBImpl state
@@ -354,6 +359,10 @@ class CompactionJob {
   // or updating it.
   int* bg_compaction_scheduled_;
   int* bg_bottom_compaction_scheduled_;
+
+  const bool track_duplicate_compaction_keys_;
+  std::unordered_map<std::string, uint64_t> duplicate_key_counts_;
+  port::Mutex duplicate_key_counts_mutex_;
 
   // Stores the sequence number to time mapping gathered from all input files
   // it also collects the smallest_seqno -> oldest_ancester_time from the SST.

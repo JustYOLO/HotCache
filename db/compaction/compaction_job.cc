@@ -190,7 +190,9 @@ CompactionJob::CompactionJob(
       blob_callback_(blob_callback),
       extra_num_subcompaction_threads_reserved_(0),
       bg_compaction_scheduled_(bg_compaction_scheduled),
-      bg_bottom_compaction_scheduled_(bg_bottom_compaction_scheduled) {
+      bg_bottom_compaction_scheduled_(bg_bottom_compaction_scheduled),
+      track_duplicate_compaction_keys_(
+          db_options.enable_compaction_duplicate_key_logging) {
   assert(compaction_job_stats_ != nullptr);
   assert(log_buffer_ != nullptr);
 
@@ -867,6 +869,7 @@ Status CompactionJob::Run() {
     }
   }
   RecordCompactionIOStats();
+  LogCompactionDuplicateKeys();
   LogFlush(db_options_.info_log);
   TEST_SYNC_POINT("CompactionJob::Run():End");
   compact_->status = status;
@@ -1326,7 +1329,8 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
           ->DoesInputReferenceBlobFiles() /* must_count_input_entries */,
       sub_compact->compaction, compaction_filter, shutting_down_,
       db_options_.info_log, full_history_ts_low, preserve_time_min_seqno_,
-      preclude_last_level_min_seqno_);
+      preclude_last_level_min_seqno_, nullptr,
+      track_duplicate_compaction_keys_);
   c_iter->SeekToFirst();
 
   const auto& c_iter_stats = c_iter->iter_stats();
@@ -1457,6 +1461,9 @@ void CompactionJob::ProcessKeyValueCompaction(SubcompactionState* sub_compact) {
   }
   if (status.ok()) {
     status = c_iter->status();
+  }
+  if (track_duplicate_compaction_keys_) {
+    MergeDuplicateKeyCounts(c_iter->TakeDuplicateKeysCounts());
   }
 
   // Call FinishCompactionOutputFile() even if status is not ok: it needs to
@@ -2186,6 +2193,64 @@ void CompactionJob::LogCompaction() {
             cfd->GetName().c_str(), job_id_);
       }
     }
+  }
+}
+
+void CompactionJob::MergeDuplicateKeyCounts(
+    std::unordered_map<std::string, uint64_t>&& counts) {
+  if (counts.empty()) {
+    return;
+  }
+  MutexLock l(&duplicate_key_counts_mutex_);
+  for (const auto& entry : counts) {
+    duplicate_key_counts_[entry.first] += entry.second;
+  }
+}
+
+void CompactionJob::LogCompactionDuplicateKeys() {
+  if (!track_duplicate_compaction_keys_) {
+    return;
+  }
+  if (db_options_.info_log == nullptr ||
+      db_options_.info_log_level > InfoLogLevel::INFO_LEVEL) {
+    return;
+  }
+  if (duplicate_key_counts_.empty()) {
+    return;
+  }
+
+  Compaction* compaction = compact_->compaction;
+  ColumnFamilyData* cfd = compaction->column_family_data();
+  SequenceNumber seqno = kMaxSequenceNumber;
+  if (job_context_) {
+    seqno = job_context_->GetJobSnapshotSequence();
+  } else if (versions_) {
+    seqno = versions_->LastSequence();
+  }
+
+  std::string level_summary;
+  for (size_t i = 0; i < compaction->num_input_levels(); ++i) {
+    if (i > 0) {
+      level_summary.append(" + ");
+    }
+    level_summary.append("L");
+    level_summary.append(std::to_string(compaction->level(i)));
+  }
+  level_summary.append(" -> L");
+  level_summary.append(std::to_string(compaction->output_level()));
+
+  ROCKS_LOG_INFO(
+      db_options_.info_log,
+      "[%s] [JOB %d] [SEQ %" PRIu64
+      "] Duplicate keys in compaction (%s): %zu",
+      cfd->GetName().c_str(), job_id_, seqno, level_summary.c_str(),
+      duplicate_key_counts_.size());
+  for (const auto& entry : duplicate_key_counts_) {
+    ROCKS_LOG_INFO(db_options_.info_log,
+                   "[%s] [JOB %d] [SEQ %" PRIu64
+                   "] Duplicate key: %s count=%" PRIu64,
+                   cfd->GetName().c_str(), job_id_, seqno,
+                   Slice(entry.first).ToString(true).c_str(), entry.second);
   }
 }
 
