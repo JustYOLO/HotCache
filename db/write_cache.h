@@ -31,6 +31,7 @@ class WriteCache {
 
   explicit WriteCache(size_t capacity_bytes = kDefaultCacheCapacityBytes,
                       EvictionCallback eviction_callback = nullptr,
+                      WriteCachePolicy policy = WriteCachePolicy::kLFU,
                       size_t per_entry_overhead_bytes = 0,
                       RecordCallback record_callback = nullptr,
                       OldestSeqCallback oldest_seq_callback = nullptr,
@@ -55,6 +56,8 @@ class WriteCache {
     uint64_t seq;
     // Iterator to the list of keys in freq_lists_
     std::list<std::string>::iterator lfu_iterator;
+    // Iterator to the list of keys in lru_list_
+    std::list<std::string>::iterator lru_iterator;
   };
   struct EvictedEntry {
     std::string key;
@@ -68,6 +71,7 @@ class WriteCache {
   std::unordered_map<std::string, CacheEntry> cache_;
   // Map from frequency to a list of keys with that frequency
   std::map<uint64_t, std::list<std::string>> freq_lists_;
+  std::list<std::string> lru_list_;
   size_t capacity_bytes_;
   size_t current_bytes_ = 0;
   size_t metadata_bytes_ = 0;
@@ -76,6 +80,7 @@ class WriteCache {
   RecordCallback record_callback_;
   OldestSeqCallback oldest_seq_callback_;
   EvictionStatsCallback eviction_stats_callback_;
+  WriteCachePolicy policy_;
   std::multiset<uint64_t> live_seqs_;
   uint64_t oldest_live_seq_ = 0;
   uint64_t next_seq_ = 1;

@@ -35,6 +35,14 @@ static std::unordered_map<std::string, WALRecoveryMode>
         {"kSkipAnyCorruptedRecords",
          WALRecoveryMode::kSkipAnyCorruptedRecords}};
 
+static std::unordered_map<std::string, WriteCachePolicy>
+    write_cache_policy_string_map = {
+        {"lfu", WriteCachePolicy::kLFU},
+        {"lru", WriteCachePolicy::kLRU},
+        {"kLFU", WriteCachePolicy::kLFU},
+        {"kLRU", WriteCachePolicy::kLRU},
+    };
+
 static std::unordered_map<std::string, CacheTier> cache_tier_string_map = {
     {"kVolatileTier", CacheTier::kVolatileTier},
     {"kVolatileCompressedTier", CacheTier::kVolatileCompressedTier},
@@ -318,6 +326,10 @@ static std::unordered_map<std::string, OptionTypeInfo>
          {offsetof(struct ImmutableDBOptions, enable_write_cache),
           OptionType::kBoolean, OptionVerificationType::kNormal,
           OptionTypeFlags::kNone}},
+        {"write_cache_policy",
+         OptionTypeInfo::Enum<WriteCachePolicy>(
+             offsetof(struct ImmutableDBOptions, write_cache_policy),
+             &write_cache_policy_string_map)},
         {"write_cache_capacity",
          {offsetof(struct ImmutableDBOptions, write_cache_capacity),
           OptionType::kSizeT, OptionVerificationType::kNormal,
@@ -817,6 +829,7 @@ ImmutableDBOptions::ImmutableDBOptions(const DBOptions& options)
       wal_write_temperature(options.wal_write_temperature),
       enable_memtable_logging(options.enable_memtable_logging),
       enable_write_cache(options.enable_write_cache),
+      write_cache_policy(options.write_cache_policy),
       write_cache_capacity(options.write_cache_capacity),
       write_cache_per_entry_overhead(options.write_cache_per_entry_overhead),
       write_cache_wal_max_file_size(options.write_cache_wal_max_file_size) {
@@ -979,6 +992,9 @@ void ImmutableDBOptions::Dump(Logger* log) const {
                    persist_stats_to_disk);
   ROCKS_LOG_HEADER(log, "                Options.enable_write_cache: %d",
                    enable_write_cache);
+  ROCKS_LOG_HEADER(
+      log, "                Options.write_cache_policy: %s",
+      write_cache_policy == WriteCachePolicy::kLRU ? "lru" : "lfu");
   ROCKS_LOG_HEADER(
       log, "                Options.write_cache_capacity: %" ROCKSDB_PRIszt,
       write_cache_capacity);

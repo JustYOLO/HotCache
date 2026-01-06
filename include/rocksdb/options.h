@@ -457,6 +457,8 @@ enum class CompactionServiceJobStatus : char {
   kUseLocal,
 };
 
+enum class WriteCachePolicy : char { kLFU, kLRU };
+
 struct CompactionServiceJobInfo {
   std::string db_name;
   std::string db_id;
@@ -542,6 +544,9 @@ struct DBOptions {
   // If true, enable the write cache that sits above the memtable.
   // Default: true.
   bool enable_write_cache = true;
+  // Write cache eviction policy.
+  // Default: kLFU.
+  WriteCachePolicy write_cache_policy = WriteCachePolicy::kLFU;
   // Write cache capacity in bytes.
   // Default: 64MB.
   size_t write_cache_capacity = 64 << 20;

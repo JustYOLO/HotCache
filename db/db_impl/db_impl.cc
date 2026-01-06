@@ -357,6 +357,7 @@ DBImpl::DBImpl(const DBOptions& options, const std::string& dbname,
     write_cache_ = std::make_unique<WriteCache>(
         immutable_db_options_.write_cache_capacity,
         std::move(eviction_callback),
+        immutable_db_options_.write_cache_policy,
         immutable_db_options_.write_cache_per_entry_overhead,
         std::move(record_callback), std::move(oldest_seq_callback),
         std::move(eviction_stats_callback));

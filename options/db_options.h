@@ -111,6 +111,7 @@ struct ImmutableDBOptions {
   // Lee: memtable logging flag
   bool enable_memtable_logging;
   bool enable_write_cache;
+  WriteCachePolicy write_cache_policy;
   size_t write_cache_capacity;
   size_t write_cache_per_entry_overhead;
   size_t write_cache_wal_max_file_size;

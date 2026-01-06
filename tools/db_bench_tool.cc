@@ -792,6 +792,8 @@ DEFINE_int64(row_cache_size, 0,
              " (0 = disabled).");
 DEFINE_bool(use_write_cache, true,
             "If true, enable the write cache above the memtable.");
+DEFINE_string(write_cache_policy, "lfu",
+              "Write cache eviction policy: lfu or lru.");
 DEFINE_int64(write_cache_capacity, 64 << 20,
              "Write cache capacity in bytes.");
 DEFINE_int64(write_cache_per_entry_overhead, 0,
@@ -1926,6 +1928,17 @@ static enum DistributionType StringToDistributionType(const char* ctype) {
   }
 
   fprintf(stdout, "Cannot parse distribution type '%s'\n", ctype);
+  exit(1);
+}
+
+static WriteCachePolicy StringToWriteCachePolicy(const char* policy) {
+  assert(policy);
+  if (!strcasecmp(policy, "lfu")) {
+    return WriteCachePolicy::kLFU;
+  } else if (!strcasecmp(policy, "lru")) {
+    return WriteCachePolicy::kLRU;
+  }
+  fprintf(stdout, "Cannot parse write cache policy '%s'\n", policy);
   exit(1);
 }
 
@@ -4451,6 +4464,8 @@ class Benchmark {
 
     options.enable_memtable_logging = FLAGS_enable_memtable_logging;
     options.enable_write_cache = FLAGS_use_write_cache;
+    options.write_cache_policy =
+        StringToWriteCachePolicy(FLAGS_write_cache_policy.c_str());
     options.write_cache_capacity =
         static_cast<size_t>(FLAGS_write_cache_capacity);
     options.write_cache_per_entry_overhead =

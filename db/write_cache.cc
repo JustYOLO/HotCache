@@ -11,6 +11,7 @@ namespace ROCKSDB_NAMESPACE {
 
 WriteCache::WriteCache(size_t capacity_bytes,
                        EvictionCallback eviction_callback,
+                       WriteCachePolicy policy,
                        size_t per_entry_overhead_bytes,
                        RecordCallback record_callback,
                        OldestSeqCallback oldest_seq_callback,
@@ -20,7 +21,8 @@ WriteCache::WriteCache(size_t capacity_bytes,
       eviction_callback_(std::move(eviction_callback)),
       record_callback_(std::move(record_callback)),
       oldest_seq_callback_(std::move(oldest_seq_callback)),
-      eviction_stats_callback_(std::move(eviction_stats_callback)) {
+      eviction_stats_callback_(std::move(eviction_stats_callback)),
+      policy_(policy) {
   if (capacity_bytes_ <= kGlobalOverheadBytes) {
     capacity_bytes_ = 0;
     return;
@@ -37,6 +39,12 @@ WriteCache::~WriteCache() {
 
 void WriteCache::Touch(typename std::unordered_map<std::string, CacheEntry>::iterator it) {
   // Assumes mutex_ is held.
+  if (policy_ == WriteCachePolicy::kLRU) {
+    lru_list_.erase(it->second.lru_iterator);
+    lru_list_.push_front(it->first);
+    it->second.lru_iterator = lru_list_.begin();
+    return;
+  }
   uint64_t old_freq = it->second.frequency;
   
   // Erase key from its old frequency list
@@ -54,33 +62,56 @@ void WriteCache::Touch(typename std::unordered_map<std::string, CacheEntry>::ite
 
 bool WriteCache::EvictLocked(EvictedEntry* evicted) {
   // Assumes mutex_ is held and cache is full.
-  if (freq_lists_.empty()) {
-    return false;
-  }
-  
-  // Get the list of keys with the lowest frequency (first element in freq_lists_)
-  auto& lfu_list = freq_lists_.begin()->second;
-  // Evict the least recently added key from that list (back of the list)
-  const std::string& key_to_evict = lfu_list.back();
-  
-  auto cache_it = cache_.find(key_to_evict);
-  if (cache_it != cache_.end()) {
-    if (cache_it->second.seq > 0) {
-      RemoveLiveSeqLocked(cache_it->second.seq);
+  if (policy_ == WriteCachePolicy::kLRU) {
+    if (lru_list_.empty()) {
+      return false;
     }
-    if (evicted && !cache_it->second.value.empty()) {
-      evicted->key = cache_it->first;
-      evicted->value = cache_it->second.value;
-      evicted->has_value = true;
+    const std::string key_to_evict = lru_list_.back();
+    auto cache_it = cache_.find(key_to_evict);
+    if (cache_it != cache_.end()) {
+      if (cache_it->second.seq > 0) {
+        RemoveLiveSeqLocked(cache_it->second.seq);
+      }
+      if (evicted && !cache_it->second.value.empty()) {
+        evicted->key = cache_it->first;
+        evicted->value = cache_it->second.value;
+        evicted->has_value = true;
+      }
+      current_bytes_ -= EntryCharge(cache_it->first, cache_it->second);
+      lru_list_.erase(cache_it->second.lru_iterator);
+      cache_.erase(cache_it);
+    } else {
+      lru_list_.pop_back();
     }
-    current_bytes_ -= EntryCharge(cache_it->first, cache_it->second);
-    cache_.erase(cache_it);
-  }
-  lfu_list.pop_back();
-  
-  // If the list for this frequency is now empty, remove the frequency entry
-  if (lfu_list.empty()) {
-    freq_lists_.erase(freq_lists_.begin());
+  } else {
+    if (freq_lists_.empty()) {
+      return false;
+    }
+
+    // Get the list of keys with the lowest frequency (first element in freq_lists_)
+    auto& lfu_list = freq_lists_.begin()->second;
+    // Evict the least recently added key from that list (back of the list)
+    const std::string& key_to_evict = lfu_list.back();
+
+    auto cache_it = cache_.find(key_to_evict);
+    if (cache_it != cache_.end()) {
+      if (cache_it->second.seq > 0) {
+        RemoveLiveSeqLocked(cache_it->second.seq);
+      }
+      if (evicted && !cache_it->second.value.empty()) {
+        evicted->key = cache_it->first;
+        evicted->value = cache_it->second.value;
+        evicted->has_value = true;
+      }
+      current_bytes_ -= EntryCharge(cache_it->first, cache_it->second);
+      cache_.erase(cache_it);
+    }
+    lfu_list.pop_back();
+
+    // If the list for this frequency is now empty, remove the frequency entry
+    if (lfu_list.empty()) {
+      freq_lists_.erase(freq_lists_.begin());
+    }
   }
   RecomputeMetadataBytesLocked();
   return true;
@@ -106,6 +137,8 @@ size_t WriteCache::ComputeMetadataBytes() const {
            (sizeof(std::pair<const uint64_t, std::list<std::string>>) +
             2 * sizeof(void*));
   bytes += cache_.size() *
+           (sizeof(std::list<std::string>::value_type) + 2 * sizeof(void*));
+  bytes += lru_list_.size() *
            (sizeof(std::list<std::string>::value_type) + 2 * sizeof(void*));
   bytes += cache_.size() * per_entry_overhead_bytes_;
   return bytes;
@@ -241,18 +274,22 @@ void WriteCache::Update(const Slice& key, uint64_t count) {
 
     auto it = cache_.find(key.ToString());
     if (it != cache_.end()) {
-      // Key already exists, just update its frequency.
-      // The logic is similar to Touch but with a different frequency increment.
-      uint64_t old_freq = it->second.frequency;
-      freq_lists_[old_freq].erase(it->second.lfu_iterator);
-      if (freq_lists_[old_freq].empty()) {
-        freq_lists_.erase(old_freq);
+      if (policy_ == WriteCachePolicy::kLRU) {
+        Touch(it);
+      } else {
+        // Key already exists, just update its frequency.
+        // The logic is similar to Touch but with a different frequency increment.
+        uint64_t old_freq = it->second.frequency;
+        freq_lists_[old_freq].erase(it->second.lfu_iterator);
+        if (freq_lists_[old_freq].empty()) {
+          freq_lists_.erase(old_freq);
+        }
+        uint64_t new_freq = it->second.frequency += count;
+        std::string key_str_in_list = it->first; // Store to avoid iterator invalidation
+        freq_lists_[new_freq].push_front(key_str_in_list);
+        it->second.lfu_iterator = freq_lists_[new_freq].begin();
+        MaybeDecayLocked();
       }
-      uint64_t new_freq = it->second.frequency += count;
-      std::string key_str_in_list = it->first; // Store to avoid iterator invalidation
-      freq_lists_[new_freq].push_front(key_str_in_list);
-      it->second.lfu_iterator = freq_lists_[new_freq].begin();
-      MaybeDecayLocked();
       return;
     }
 
@@ -263,11 +300,20 @@ void WriteCache::Update(const Slice& key, uint64_t count) {
     if (entry_charge > capacity_bytes_) {
       return;
     }
-    freq_lists_[new_freq].push_front(key_str);
+    std::list<std::string>::iterator lfu_it;
+    std::list<std::string>::iterator lru_it;
+    if (policy_ == WriteCachePolicy::kLRU) {
+      lru_list_.push_front(key_str);
+      lru_it = lru_list_.begin();
+      new_freq = 1;
+    } else {
+      freq_lists_[new_freq].push_front(key_str);
+      lfu_it = freq_lists_[new_freq].begin();
+      lru_it = lru_list_.end();
+    }
     current_bytes_ += entry_charge;
     cache_.emplace(std::move(key_str),
-                   CacheEntry{"", new_freq, 0,
-                              freq_lists_[new_freq].begin()});
+                   CacheEntry{"", new_freq, 0, lfu_it, lru_it});
     RecomputeMetadataBytesLocked();
     while (TotalBytes() > capacity_bytes_ && !cache_.empty()) {
       EvictedEntry evicted;
@@ -307,6 +353,9 @@ void WriteCache::Update(const Slice& key, uint64_t count) {
 }
 
 void WriteCache::MaybeDecayLocked() {
+  if (policy_ != WriteCachePolicy::kLFU) {
+    return;
+  }
   if (kFrequencyDecayIntervalOps == 0) {
     return;
   }
