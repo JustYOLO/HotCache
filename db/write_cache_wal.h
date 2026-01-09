@@ -40,6 +40,8 @@ class WriteCacheWAL {
   void IncrementInPlaceUpdateCount();
   void AddEvictedCount(uint64_t evicted_count);
   void AddLogicalBytes(uint64_t bytes);
+  void AddGetHit();
+  void AddGetMiss();
   void GetStatsString(std::string* value);
 
   void UpdateOldestLiveSeq(uint64_t oldest_live_seq);
@@ -81,6 +83,8 @@ class WriteCacheWAL {
   uint64_t in_place_update_count_;
   uint64_t evicted_count_;
   uint64_t logical_bytes_;
+  uint64_t get_hit_count_;
+  uint64_t get_miss_count_;
   uint64_t last_log_bytes_reported_;
   uint64_t deleted_file_count_;
   port::Mutex mutex_;

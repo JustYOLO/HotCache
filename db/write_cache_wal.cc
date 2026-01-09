@@ -57,6 +57,8 @@ WriteCacheWAL::WriteCacheWAL(const ImmutableDBOptions& immutable_db_options,
       in_place_update_count_(0),
       evicted_count_(0),
       logical_bytes_(0),
+      get_hit_count_(0),
+      get_miss_count_(0),
       last_log_bytes_reported_(0),
       deleted_file_count_(0) {}
 
@@ -105,6 +107,16 @@ void WriteCacheWAL::AddLogicalBytes(uint64_t bytes) {
   logical_bytes_ += bytes;
 }
 
+void WriteCacheWAL::AddGetHit() {
+  MutexLock lock(&mutex_);
+  ++get_hit_count_;
+}
+
+void WriteCacheWAL::AddGetMiss() {
+  MutexLock lock(&mutex_);
+  ++get_miss_count_;
+}
+
 void WriteCacheWAL::GetStatsString(std::string* value) {
   MutexLock lock(&mutex_);
   value->clear();
@@ -119,6 +131,10 @@ void WriteCacheWAL::GetStatsString(std::string* value) {
   value->append(std::to_string(delete_count_));
   value->append("\nin_place_updates: ");
   value->append(std::to_string(in_place_update_count_));
+  value->append("\nget_hits: ");
+  value->append(std::to_string(get_hit_count_));
+  value->append("\nget_misses: ");
+  value->append(std::to_string(get_miss_count_));
   value->append("\nevicted_entries: ");
   value->append(std::to_string(evicted_count_));
   value->append("\noldest_live_seq: ");

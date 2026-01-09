@@ -2415,8 +2415,14 @@ Status DBImpl::GetImpl(const ReadOptions& read_options, const Slice& key,
   if (get_impl_options.value && !read_options.timestamp && write_cache_) {
     std::string cached_value;
     if (write_cache_->Get(key, &cached_value)) {
+      if (write_cache_wal_) {
+        write_cache_wal_->AddGetHit();
+      }
       get_impl_options.value->PinSelf(Slice(cached_value));
       return Status::OK();
+    }
+    if (write_cache_wal_) {
+      write_cache_wal_->AddGetMiss();
     }
   }
 

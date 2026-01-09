@@ -11,6 +11,7 @@
 #include "db/db_impl/db_impl.h"
 #include "db/error_handler.h"
 #include "db/event_helpers.h"
+#include "db/write_cache_wal.h"
 #include "logging/logging.h"
 #include "memtable/wbwi_memtable.h"
 #include "monitoring/perf_context_imp.h"
