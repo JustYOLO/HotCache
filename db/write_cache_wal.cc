@@ -56,6 +56,7 @@ WriteCacheWAL::WriteCacheWAL(const ImmutableDBOptions& immutable_db_options,
       delete_count_(0),
       in_place_update_count_(0),
       evicted_count_(0),
+      logical_bytes_(0),
       last_log_bytes_reported_(0),
       deleted_file_count_(0) {}
 
@@ -96,12 +97,22 @@ void WriteCacheWAL::AddEvictedCount(uint64_t evicted_count) {
   evicted_count_ += evicted_count;
 }
 
+void WriteCacheWAL::AddLogicalBytes(uint64_t bytes) {
+  if (bytes == 0) {
+    return;
+  }
+  MutexLock lock(&mutex_);
+  logical_bytes_ += bytes;
+}
+
 void WriteCacheWAL::GetStatsString(std::string* value) {
   MutexLock lock(&mutex_);
   value->clear();
   value->append("** WriteCache stats ** \n");
   value->append("write_cache_wal_bytes: ");
   value->append(std::to_string(total_bytes_written_));
+  value->append("\nwrite_cache_logical_bytes: ");
+  value->append(std::to_string(logical_bytes_));
   value->append("\nputs: ");
   value->append(std::to_string(put_count_));
   value->append("\ndeletes: ");

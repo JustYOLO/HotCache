@@ -1876,6 +1876,11 @@ DEFINE_uint64(twitter_chunk_bytes, 10ULL * 1024 * 1024 * 1024,
               "Maximum number of bytes of Twitter trace to process in one run. "
               "0 means process until EOF.");
 
+DEFINE_uint64(
+    twitter_queue_bytes, 256ULL * 1024 * 1024,
+    "Maximum bytes of Twitter trace text buffered between reader and replayer. "
+    "0 means unbounded.");
+
 DEFINE_string(
     twitter_offset_file, "",
     "Optional file to persist last processed byte offset for Twitter trace. "
@@ -7766,61 +7771,47 @@ class Benchmark {
       file_size = 0;
     }
 
-    // Approximate text-bytes limit per chunk.
-    const uint64_t chunk_limit = (FLAGS_twitter_chunk_bytes == 0)
-                                     ? std::numeric_limits<uint64_t>::max()
-                                     : FLAGS_twitter_chunk_bytes;
+    // Use chunk size only for progress logging, not control flow.
+    const uint64_t report_interval = (FLAGS_twitter_chunk_bytes == 0)
+                                         ? std::numeric_limits<uint64_t>::max()
+                                         : FLAGS_twitter_chunk_bytes;
+    const uint64_t queue_limit = FLAGS_twitter_queue_bytes;
 
     uint64_t total_lines = 0;
     uint64_t total_gets = 0;
     uint64_t total_puts = 0;
     uint64_t total_found = 0;
     uint64_t total_bytes = 0;       // bytes transferred via DB operations
-    uint64_t total_text_bytes = 0;  // NEW: raw text bytes read from trace
-
     ReadOptions read_opts = read_options_;
     WriteOptions write_opts = write_options_;
 
-    std::string line;
     std::string value_buf;  // reused dummy value buffer
 
-    uint64_t chunk_index = 0;
+    struct TwitterTraceItem {
+      TwitterTraceRecord rec;
+      uint64_t text_bytes = 0;
+    };
 
-    while (true) {
-      // One chunk: load lines until chunk_limit is reached (in text bytes)
-      std::vector<TwitterTraceRecord> records;
-      records.reserve(1024);
+    std::mutex queue_mu;
+    std::condition_variable queue_cv_not_empty;
+    std::condition_variable queue_cv_not_full;
+    std::queue<TwitterTraceItem> queue;
+    uint64_t queue_bytes = 0;
+    bool reader_done = false;
 
-      uint64_t text_bytes_in_chunk = 0;
-
-      while (text_bytes_in_chunk < chunk_limit && std::getline(in, line)) {
-        text_bytes_in_chunk +=
-            static_cast<uint64_t>(line.size()) + 1;  // +1 for '\n'
-
-        TwitterTraceRecord rec;
-        if (!ParseTwitterTraceLine(line, &rec)) {
-          continue;  // skip malformed lines
-        }
-        records.emplace_back(std::move(rec));
+    auto LogProgress = [&](uint64_t chunk_bytes, uint64_t cumulative_bytes,
+                           uint64_t chunk_index) {
+      if (chunk_bytes == 0) {
+        return;
       }
-
-      if (records.empty()) {
-        // No more data to process (EOF or only malformed lines remain)
-        break;
-      }
-
-      chunk_index++;
-      total_text_bytes += text_bytes_in_chunk;
-
-      // Optional: progress just after loading the chunk
       if (file_size > 0) {
-        double pct = 100.0 * static_cast<long double>(total_text_bytes) /
+        double pct = 100.0 * static_cast<long double>(cumulative_bytes) /
                      static_cast<long double>(file_size);
         fprintf(stdout,
                 "twittertrace: loaded chunk %" PRIu64
                 " (%.3f GiB text, %.2f%% of file)\n",
                 chunk_index,
-                static_cast<double>(text_bytes_in_chunk) /
+                static_cast<double>(chunk_bytes) /
                     (1024.0 * 1024.0 * 1024.0),
                 pct);
       } else {
@@ -7829,82 +7820,171 @@ class Benchmark {
             "twittertrace: loaded chunk %" PRIu64
             " (%.3f GiB text, cumulative %.3f GiB)\n",
             chunk_index,
-            static_cast<double>(text_bytes_in_chunk) /
+            static_cast<double>(chunk_bytes) /
                 (1024.0 * 1024.0 * 1024.0),
-            static_cast<double>(total_text_bytes) / (1024.0 * 1024.0 * 1024.0));
+            static_cast<double>(cumulative_bytes) / (1024.0 * 1024.0 * 1024.0));
       }
       fflush(stdout);
+    };
 
-      // Replay this chunk into RocksDB
-      uint64_t chunk_lines = 0;
-      uint64_t chunk_gets = 0;
-      uint64_t chunk_puts = 0;
-      uint64_t chunk_found = 0;
-      uint64_t chunk_bytes = 0;
+    std::thread reader([&]() {
+      std::string line;
+      uint64_t text_bytes_in_chunk = 0;
+      uint64_t total_text_bytes = 0;
+      uint64_t chunk_index = 0;
 
-      for (const auto& rec : records) {
-        Status s;
-        Slice key(rec.key);
+      while (std::getline(in, line)) {
+        uint64_t line_bytes = static_cast<uint64_t>(line.size()) + 1;
+        total_text_bytes += line_bytes;
+        text_bytes_in_chunk += line_bytes;
 
-        if (rec.op == "get" || rec.op == "gets") {
-          chunk_gets++;
-          std::string val;
-          s = db->Get(read_opts, key, &val);
-          if (s.ok()) {
-            chunk_found++;
-            chunk_bytes += key.size() + val.size();
-          } else if (!s.IsNotFound()) {
-            fprintf(stderr, "twittertrace: Get error: %s\n",
-                    s.ToString().c_str());
-            ErrorExit();
-          }
-          thread->stats.FinishedOps(&db_, db, 1, kRead);
-
-        } else if (rec.op == "set" || rec.op == "add" || rec.op == "replace" ||
-                   rec.op == "append" || rec.op == "prepend") {
-          chunk_puts++;
-
-          // Generate dummy value of requested size.
-          if (value_buf.size() < rec.value_size) {
-            value_buf.assign(rec.value_size, 'x');
-          }
-          Slice val(value_buf.data(), rec.value_size);
-
-          s = db->Put(write_opts, key, val);
-          if (!s.ok()) {
-            fprintf(stderr, "twittertrace: Put error: %s\n",
-                    s.ToString().c_str());
-            ErrorExit();
-          }
-          chunk_bytes += key.size() + rec.value_size;
-          thread->stats.FinishedOps(&db_, db, 1, kWrite);
-
-        } else {
-          // Ignore other ops: delete, incr, decr, cas, etc.
-          continue;
+        TwitterTraceRecord rec;
+        if (!ParseTwitterTraceLine(line, &rec)) {
+          continue;  // skip malformed lines
         }
 
-        chunk_lines++;
+        std::unique_lock<std::mutex> lock(queue_mu);
+        queue_cv_not_full.wait(lock, [&]() {
+          return reader_done || queue_limit == 0 ||
+                 (queue_bytes + line_bytes <= queue_limit) ||
+                 (queue_bytes == 0 && line_bytes > queue_limit);
+        });
+        if (reader_done) {
+          break;
+        }
+        queue.push(TwitterTraceItem{std::move(rec), line_bytes});
+        queue_bytes += line_bytes;
+        lock.unlock();
+        queue_cv_not_empty.notify_one();
+
+        if (text_bytes_in_chunk >= report_interval) {
+          chunk_index++;
+          LogProgress(text_bytes_in_chunk, total_text_bytes, chunk_index);
+          text_bytes_in_chunk = 0;
+        }
       }
 
-      // Accumulate per-chunk statistics into totals
-      total_lines += chunk_lines;
-      total_gets += chunk_gets;
-      total_puts += chunk_puts;
-      total_found += chunk_found;
-      total_bytes += chunk_bytes;
+      if (text_bytes_in_chunk > 0 || total_text_bytes == 0) {
+        chunk_index++;
+        LogProgress(text_bytes_in_chunk, total_text_bytes, chunk_index);
+      }
 
-      // Progress after replaying the chunk
+      {
+        std::lock_guard<std::mutex> lock(queue_mu);
+        reader_done = true;
+      }
+      queue_cv_not_empty.notify_all();
+    });
+
+    uint64_t chunk_index = 0;
+    uint64_t chunk_lines = 0;
+    uint64_t chunk_gets = 0;
+    uint64_t chunk_puts = 0;
+    uint64_t chunk_found = 0;
+    uint64_t chunk_bytes = 0;
+
+    while (true) {
+      TwitterTraceItem item;
+      {
+        std::unique_lock<std::mutex> lock(queue_mu);
+        queue_cv_not_empty.wait(
+            lock, [&]() { return reader_done || !queue.empty(); });
+        if (queue.empty()) {
+          break;
+        }
+        item = std::move(queue.front());
+        queue.pop();
+        queue_bytes -= item.text_bytes;
+      }
+      queue_cv_not_full.notify_one();
+
+      const auto& rec = item.rec;
+      Status s;
+      Slice key(rec.key);
+
+      if (rec.op == "get" || rec.op == "gets") {
+        chunk_gets++;
+        std::string val;
+        s = db->Get(read_opts, key, &val);
+        if (s.ok()) {
+          chunk_found++;
+          chunk_bytes += key.size() + val.size();
+        } else if (!s.IsNotFound()) {
+          fprintf(stderr, "twittertrace: Get error: %s\n",
+                  s.ToString().c_str());
+          ErrorExit();
+        }
+        thread->stats.FinishedOps(&db_, db, 1, kRead);
+
+      } else if (rec.op == "set" || rec.op == "add" || rec.op == "replace" ||
+                 rec.op == "append" || rec.op == "prepend") {
+        chunk_puts++;
+
+        // Generate dummy value of requested size.
+        if (value_buf.size() < rec.value_size) {
+          value_buf.assign(rec.value_size, 'x');
+        }
+        Slice val(value_buf.data(), rec.value_size);
+
+        s = db->Put(write_opts, key, val);
+        if (!s.ok()) {
+          fprintf(stderr, "twittertrace: Put error: %s\n",
+                  s.ToString().c_str());
+          ErrorExit();
+        }
+        chunk_bytes += key.size() + rec.value_size;
+        thread->stats.FinishedOps(&db_, db, 1, kWrite);
+
+      } else {
+        // Ignore other ops: delete, incr, decr, cas, etc.
+        continue;
+      }
+
+      chunk_lines++;
+      if (chunk_lines >= 1000000) {
+        chunk_index++;
+        fprintf(stdout,
+                "twittertrace: replayed chunk %" PRIu64 " (lines:%" PRIu64
+                ", gets:%" PRIu64 ", puts:%" PRIu64 ")\n",
+                chunk_index, chunk_lines, chunk_gets, chunk_puts);
+        fflush(stdout);
+
+        total_lines += chunk_lines;
+        total_gets += chunk_gets;
+        total_puts += chunk_puts;
+        total_found += chunk_found;
+        total_bytes += chunk_bytes;
+
+        chunk_lines = 0;
+        chunk_gets = 0;
+        chunk_puts = 0;
+        chunk_found = 0;
+        chunk_bytes = 0;
+      }
+    }
+
+    if (chunk_lines > 0) {
+      chunk_index++;
       fprintf(stdout,
               "twittertrace: replayed chunk %" PRIu64 " (lines:%" PRIu64
               ", gets:%" PRIu64 ", puts:%" PRIu64 ")\n",
               chunk_index, chunk_lines, chunk_gets, chunk_puts);
       fflush(stdout);
 
-      // If EOF reached, stop; otherwise, next iteration will load another chunk
-      if (!in.good() && in.eof()) {
-        break;
-      }
+      total_lines += chunk_lines;
+      total_gets += chunk_gets;
+      total_puts += chunk_puts;
+      total_found += chunk_found;
+      total_bytes += chunk_bytes;
+    }
+
+    {
+      std::lock_guard<std::mutex> lock(queue_mu);
+      reader_done = true;
+    }
+    queue_cv_not_full.notify_all();
+    if (reader.joinable()) {
+      reader.join();
     }
 
     // Final statistics

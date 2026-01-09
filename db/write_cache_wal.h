@@ -39,6 +39,7 @@ class WriteCacheWAL {
                    const WriteOptions* write_options);
   void IncrementInPlaceUpdateCount();
   void AddEvictedCount(uint64_t evicted_count);
+  void AddLogicalBytes(uint64_t bytes);
   void GetStatsString(std::string* value);
 
   void UpdateOldestLiveSeq(uint64_t oldest_live_seq);
@@ -79,6 +80,7 @@ class WriteCacheWAL {
   uint64_t delete_count_;
   uint64_t in_place_update_count_;
   uint64_t evicted_count_;
+  uint64_t logical_bytes_;
   uint64_t last_log_bytes_reported_;
   uint64_t deleted_file_count_;
   port::Mutex mutex_;

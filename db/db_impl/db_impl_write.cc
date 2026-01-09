@@ -28,6 +28,9 @@ Status DBImpl::Put(const WriteOptions& o, ColumnFamilyHandle* column_family,
   }
 
   if (write_cache_ && write_cache_->Put(key, val, o)) {
+    if (write_cache_wal_) {
+      write_cache_wal_->AddLogicalBytes(key.size() + val.size());
+    }
     return Status::OK();
   }
 
