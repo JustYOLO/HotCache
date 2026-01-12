@@ -111,6 +111,7 @@ struct ImmutableDBOptions {
   // Lee: memtable logging flag
   bool enable_memtable_logging;
   bool enable_compaction_duplicate_key_logging;
+  bool enable_compaction_garbage_logging;
   bool enable_write_cache;
   WriteCachePolicy write_cache_policy;
   size_t write_cache_capacity;

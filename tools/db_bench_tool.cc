@@ -1228,6 +1228,8 @@ DEFINE_bool(use_stderr_info_logger, false,
 
 DEFINE_bool(compaction_duplicate_key_logging, false,
             "If true, log duplicate user keys encountered during compaction.");
+DEFINE_bool(compaction_garbage_logging, false,
+            "If true, log compaction garbage percentage to the DB LOG.");
 
 DEFINE_string(trace_file, "", "Trace workload to a file. ");
 
@@ -4473,6 +4475,8 @@ class Benchmark {
     options.enable_memtable_logging = FLAGS_enable_memtable_logging;
     options.enable_compaction_duplicate_key_logging =
         FLAGS_compaction_duplicate_key_logging;
+    options.enable_compaction_garbage_logging =
+        FLAGS_compaction_garbage_logging;
     options.enable_write_cache = FLAGS_use_write_cache;
     options.write_cache_policy =
         StringToWriteCachePolicy(FLAGS_write_cache_policy.c_str());

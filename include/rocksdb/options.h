@@ -642,6 +642,9 @@ struct DBOptions {
   // If true, log duplicate user keys encountered during compaction, with counts
   // and compaction level summary. Default: false.
   bool enable_compaction_duplicate_key_logging = false;
+  // If true, log compaction garbage percentage (duplicate-only garbage vs.
+  // total input records) to the DB LOG. Default: false.
+  bool enable_compaction_garbage_logging = false;
 
   // If true, the log numbers and sizes of the synced WALs are tracked
   // in MANIFEST. During DB recovery, if a synced WAL is missing

@@ -192,7 +192,8 @@ CompactionJob::CompactionJob(
       bg_compaction_scheduled_(bg_compaction_scheduled),
       bg_bottom_compaction_scheduled_(bg_bottom_compaction_scheduled),
       track_duplicate_compaction_keys_(
-          db_options.enable_compaction_duplicate_key_logging) {
+          db_options.enable_compaction_duplicate_key_logging ||
+          db_options.enable_compaction_garbage_logging) {
   assert(compaction_job_stats_ != nullptr);
   assert(log_buffer_ != nullptr);
 
@@ -870,6 +871,7 @@ Status CompactionJob::Run() {
   }
   RecordCompactionIOStats();
   LogCompactionDuplicateKeys();
+  LogCompactionGarbageStats();
   LogFlush(db_options_.info_log);
   TEST_SYNC_POINT("CompactionJob::Run():End");
   compact_->status = status;
@@ -2252,6 +2254,72 @@ void CompactionJob::LogCompactionDuplicateKeys() {
                    cfd->GetName().c_str(), job_id_, seqno,
                    Slice(entry.first).ToString(true).c_str(), entry.second);
   }
+}
+
+void CompactionJob::LogCompactionGarbageStats() {
+  if (!db_options_.enable_compaction_garbage_logging) {
+    return;
+  }
+  if (db_options_.info_log == nullptr ||
+      db_options_.info_log_level > InfoLogLevel::INFO_LEVEL) {
+    return;
+  }
+
+  uint64_t total_input = 0;
+  if (compaction_job_stats_ &&
+      compaction_job_stats_->has_num_input_records) {
+    total_input = compaction_job_stats_->num_input_records;
+  } else {
+    total_input = compaction_stats_.stats.num_input_records;
+  }
+  if (total_input == 0) {
+    return;
+  }
+
+  uint64_t garbage_entries = 0;
+  {
+    MutexLock l(&duplicate_key_counts_mutex_);
+    for (const auto& entry : duplicate_key_counts_) {
+      if (entry.second > 1) {
+        garbage_entries += (entry.second - 1);
+      }
+    }
+  }
+
+  double garbage_pct =
+      total_input > 0
+          ? (static_cast<double>(garbage_entries) /
+             static_cast<double>(total_input)) *
+                100.0
+          : 0.0;
+
+  Compaction* compaction = compact_->compaction;
+  ColumnFamilyData* cfd = compaction->column_family_data();
+  SequenceNumber seqno = kMaxSequenceNumber;
+  if (job_context_) {
+    seqno = job_context_->GetJobSnapshotSequence();
+  } else if (versions_) {
+    seqno = versions_->LastSequence();
+  }
+
+  std::string level_summary;
+  for (size_t i = 0; i < compaction->num_input_levels(); ++i) {
+    if (i > 0) {
+      level_summary.append(" + ");
+    }
+    level_summary.append("L");
+    level_summary.append(std::to_string(compaction->level(i)));
+  }
+  level_summary.append(" -> L");
+  level_summary.append(std::to_string(compaction->output_level()));
+
+  ROCKS_LOG_INFO(
+      db_options_.info_log,
+      "[%s] [JOB %d] [SEQ %" PRIu64
+      "] Compaction garbage (duplicate-only): %" PRIu64 "/%" PRIu64
+      " (%.2f%%) [%s]",
+      cfd->GetName().c_str(), job_id_, seqno, garbage_entries, total_input,
+      garbage_pct, level_summary.c_str());
 }
 
 std::string CompactionJob::GetTableFileName(uint64_t file_number) {

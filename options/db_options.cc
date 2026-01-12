@@ -331,6 +331,11 @@ static std::unordered_map<std::string, OptionTypeInfo>
                    enable_compaction_duplicate_key_logging),
           OptionType::kBoolean, OptionVerificationType::kNormal,
           OptionTypeFlags::kNone}},
+        {"enable_compaction_garbage_logging",
+         {offsetof(struct ImmutableDBOptions,
+                   enable_compaction_garbage_logging),
+          OptionType::kBoolean, OptionVerificationType::kNormal,
+          OptionTypeFlags::kNone}},
         {"write_cache_policy",
          OptionTypeInfo::Enum<WriteCachePolicy>(
              offsetof(struct ImmutableDBOptions, write_cache_policy),
@@ -835,6 +840,8 @@ ImmutableDBOptions::ImmutableDBOptions(const DBOptions& options)
       enable_memtable_logging(options.enable_memtable_logging),
       enable_compaction_duplicate_key_logging(
           options.enable_compaction_duplicate_key_logging),
+      enable_compaction_garbage_logging(
+          options.enable_compaction_garbage_logging),
       enable_write_cache(options.enable_write_cache),
       write_cache_policy(options.write_cache_policy),
       write_cache_capacity(options.write_cache_capacity),
@@ -1002,6 +1009,8 @@ void ImmutableDBOptions::Dump(Logger* log) const {
   ROCKS_LOG_HEADER(
       log, "Options.enable_compaction_duplicate_key_logging: %d",
       enable_compaction_duplicate_key_logging);
+  ROCKS_LOG_HEADER(log, "       Options.enable_compaction_garbage_logging: %d",
+                   enable_compaction_garbage_logging);
   ROCKS_LOG_HEADER(
       log, "                Options.write_cache_policy: %s",
       write_cache_policy == WriteCachePolicy::kLRU ? "lru" : "lfu");

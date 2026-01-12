@@ -298,6 +298,7 @@ class CompactionJob {
   void MergeDuplicateKeyCounts(
       std::unordered_map<std::string, uint64_t>&& counts);
   void LogCompactionDuplicateKeys();
+  void LogCompactionGarbageStats();
 
   uint32_t job_id_;
 
