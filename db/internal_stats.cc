@@ -179,8 +179,8 @@ void PrintLevelStats(char* buf, size_t len, const std::string& name,
       "%17.2f "   /*  CompMergeCPU(sec) */
       "%9d "      /*  Comp(cnt) */
       "%8.3f "    /*  Avg(sec) */
-      "%7s "      /*  KeyIn */
-      "%6s "      /*  KeyDrop */
+      "%12" PRIu64 " " /*  KeyIn */
+      "%12" PRIu64 " " /*  KeyDrop */
       "%9.1f "    /*  Rblob(GB) */
       "%9.1f\n",  /*  Wblob(GB) */
       name.c_str(), static_cast<int>(stat_value.at(LevelStatType::NUM_FILES)),
@@ -202,12 +202,8 @@ void PrintLevelStats(char* buf, size_t len, const std::string& name,
       stat_value.at(LevelStatType::COMP_CPU_SEC),
       static_cast<int>(stat_value.at(LevelStatType::COMP_COUNT)),
       stat_value.at(LevelStatType::AVG_SEC),
-      NumberToHumanString(
-          static_cast<std::int64_t>(stat_value.at(LevelStatType::KEY_IN)))
-          .c_str(),
-      NumberToHumanString(
-          static_cast<std::int64_t>(stat_value.at(LevelStatType::KEY_DROP)))
-          .c_str(),
+      static_cast<uint64_t>(stat_value.at(LevelStatType::KEY_IN)),
+      static_cast<uint64_t>(stat_value.at(LevelStatType::KEY_DROP)),
       stat_value.at(LevelStatType::R_BLOB_GB),
       stat_value.at(LevelStatType::W_BLOB_GB));
 }

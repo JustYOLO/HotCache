@@ -1649,6 +1649,9 @@ DEFINE_double(mix_seek_ratio, 0.0,
               "The ratio of Seek queries of mix_graph workload");
 DEFINE_int64(mix_max_scan_len, 10000, "The max scan length of Iterator");
 DEFINE_int64(mix_max_value_size, 1024, "The max value size of this workload");
+DEFINE_uint64(put_limit, 0,
+              "Stop mixgraph/twittertrace after this many put operations "
+              "(0=disabled).");
 DEFINE_double(
     sine_mix_rate_noise, 0.0,
     "Add the noise ratio to the sine rate, it is between 0.0 and 1.0");
@@ -3984,6 +3987,10 @@ class Benchmark {
       } else if (name == "approximatememtablestats") {
         method = &Benchmark::ApproximateMemtableStats;
       } else if (name == "mixgraph") {
+        if (FLAGS_put_limit > 0 && num_threads > 1) {
+          fprintf(stderr, "mixgraph: --put_limit supports only 1 thread\n");
+          ErrorExit();
+        }
         method = &Benchmark::MixGraph;
       } else if (name == "readmissing") {
         ++key_size_;
@@ -7073,6 +7080,7 @@ class Benchmark {
     char value_buffer[default_value_max];
     QueryDecider query;
     RandomGenerator gen;
+    const uint64_t put_limit = FLAGS_put_limit;
     Status s;
     if (value_max > FLAGS_mix_max_value_size) {
       value_max = FLAGS_mix_max_value_size;
@@ -7105,6 +7113,9 @@ class Benchmark {
 
     Duration duration(FLAGS_duration, reads_);
     while (!duration.Done(1)) {
+      if (put_limit > 0 && puts >= static_cast<int64_t>(put_limit)) {
+        break;
+      }
       DBWithColumnFamilies* db_with_cfh = SelectDBWithCfh(thread);
       int64_t ini_rand, rand_v, key_rand, key_seed;
       ini_rand = GetRandomKey(&thread->rand);
@@ -7980,6 +7991,7 @@ class Benchmark {
     uint64_t total_puts = 0;
     uint64_t total_found = 0;
     uint64_t total_bytes = 0;       // bytes transferred via DB operations
+    const uint64_t put_limit = FLAGS_put_limit;
     ReadOptions read_opts = read_options_;
     WriteOptions write_opts = write_options_;
 
@@ -7996,6 +8008,7 @@ class Benchmark {
     std::queue<TwitterTraceItem> queue;
     uint64_t queue_bytes = 0;
     bool reader_done = false;
+    std::atomic<bool> stop_processing(false);
 
     auto LogProgress = [&](uint64_t chunk_bytes, uint64_t cumulative_bytes,
                            uint64_t chunk_index) {
@@ -8032,6 +8045,9 @@ class Benchmark {
       uint64_t chunk_index = 0;
 
       while (std::getline(in, line)) {
+        if (stop_processing.load(std::memory_order_acquire)) {
+          break;
+        }
         uint64_t line_bytes = static_cast<uint64_t>(line.size()) + 1;
         total_text_bytes += line_bytes;
         text_bytes_in_chunk += line_bytes;
@@ -8082,6 +8098,16 @@ class Benchmark {
     uint64_t chunk_bytes = 0;
 
     while (true) {
+      if (put_limit > 0 && total_puts >= put_limit) {
+        stop_processing.store(true, std::memory_order_release);
+        {
+          std::lock_guard<std::mutex> lock(queue_mu);
+          reader_done = true;
+        }
+        queue_cv_not_empty.notify_all();
+        queue_cv_not_full.notify_all();
+        break;
+      }
       TwitterTraceItem item;
       {
         std::unique_lock<std::mutex> lock(queue_mu);
@@ -8117,6 +8143,7 @@ class Benchmark {
       } else if (rec.op == "set" || rec.op == "add" || rec.op == "replace" ||
                  rec.op == "append" || rec.op == "prepend") {
         chunk_puts++;
+        total_puts++;
 
         // Generate dummy value of requested size.
         if (value_buf.size() < rec.value_size) {
@@ -8149,7 +8176,6 @@ class Benchmark {
 
         total_lines += chunk_lines;
         total_gets += chunk_gets;
-        total_puts += chunk_puts;
         total_found += chunk_found;
         total_bytes += chunk_bytes;
 
@@ -8171,7 +8197,6 @@ class Benchmark {
 
       total_lines += chunk_lines;
       total_gets += chunk_gets;
-      total_puts += chunk_puts;
       total_found += chunk_found;
       total_bytes += chunk_bytes;
     }
