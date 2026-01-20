@@ -367,6 +367,12 @@ struct FlushJobInfo {
   SequenceNumber largest_seqno;
   // Table properties of the table being flushed
   TableProperties table_properties;
+  // Total number of input entries from memtables before flush filtering.
+  uint64_t num_input_entries = 0;
+  // Total payload bytes in memtables at flush.
+  uint64_t memtable_payload_bytes = 0;
+  // Total garbage bytes in memtables at flush.
+  uint64_t memtable_garbage_bytes = 0;
 
   FlushReason flush_reason;
 

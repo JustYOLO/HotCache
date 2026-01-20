@@ -38,6 +38,7 @@
 #include <cstddef>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -59,6 +60,7 @@
 #include "rocksdb/db.h"
 #include "rocksdb/env.h"
 #include "rocksdb/filter_policy.h"
+#include "rocksdb/listener.h"
 #include "rocksdb/memtablerep.h"
 #include "rocksdb/options.h"
 #include "rocksdb/perf_context.h"
@@ -69,6 +71,7 @@
 #include "rocksdb/slice_transform.h"
 #include "rocksdb/stats_history.h"
 #include "rocksdb/table.h"
+#include "rocksdb/table_properties.h"
 #include "rocksdb/utilities/backup_engine.h"
 #include "rocksdb/utilities/object_registry.h"
 #include "rocksdb/utilities/optimistic_transaction_db.h"
@@ -248,6 +251,7 @@ DEFINE_string(
     "\tcompact1  -- compact L1 into L2\n"
     "\twaitforcompaction - pause until compaction is (probably) done\n"
     "\tflush - flush the memtable\n"
+    "\tflushstats  -- Print per-flush output stats (requires --flushstats)\n"
     "\tstats       -- Print DB stats\n"
     "\tresetstats  -- Reset DB stats\n"
     "\tlevelstats  -- Print the number of files and bytes per level\n"
@@ -380,7 +384,7 @@ DEFINE_int32(num_multi_db, 0,
 
 DEFINE_double(zipf_const, 0.99, "Zipfian constant for Zipf distribution");
 
-DEFINE_int64(key_range, 10000000, "zipf key range");
+DEFINE_int64(key_range, 0, "zipf key range");
 struct BenchmarkParams {
   double zipf_const;
   int64_t key_range;
@@ -560,6 +564,9 @@ DEFINE_uint64(subcompactions, 1,
               "into.");
 static const bool FLAGS_subcompactions_dummy __attribute__((__unused__)) =
     RegisterFlagValidator(&FLAGS_subcompactions, &ValidateUint32Range);
+
+DEFINE_bool(compaction_logging, false,
+            "Enable compaction latency breakdown logging (db_bench only).");
 
 DEFINE_int32(max_background_flushes,
              ROCKSDB_NAMESPACE::Options().max_background_flushes,
@@ -1492,6 +1499,9 @@ DEFINE_int32(stats_per_interval, 0,
              "Reports additional stats per interval when this is greater than "
              "0.");
 
+DEFINE_bool(flushstats, false,
+            "Collect and report per-flush output stats (adds overhead).");
+
 DEFINE_uint64(slow_usecs, 1000000,
               "A message is printed for operations that take at least this "
               "many microseconds.");
@@ -2161,6 +2171,131 @@ struct DBWithColumnFamilies {
     }
     num_created.store(new_num_created, std::memory_order_release);
   }
+};
+
+struct FlushStatsRecord {
+  int level = -1;
+  uint64_t file_number = 0;
+  uint64_t memtable_bytes = 0;
+  uint64_t output_bytes = 0;
+  uint64_t total_entries = 0;
+  uint64_t unique_keys = 0;
+  std::string cf_name;
+};
+
+constexpr const char* kFlushStatsTotalEntries =
+    "db_bench.flushstats.total_entries";
+constexpr const char* kFlushStatsUniqueKeys = "db_bench.flushstats.unique_keys";
+constexpr const char* kFlushStatsMemtableBytes =
+    "db_bench.flushstats.memtable_bytes";
+constexpr const char* kFlushStatsLevel = "db_bench.flushstats.level";
+
+class FlushStatsCollector : public TablePropertiesCollector {
+ public:
+  explicit FlushStatsCollector(int level_at_creation)
+      : level_(level_at_creation),
+        total_entries_(0),
+        unique_keys_(0),
+        memtable_bytes_(0),
+        has_last_(false) {}
+
+  Status AddUserKey(const Slice& key, const Slice& value,
+                    EntryType /*type*/, SequenceNumber /*seq*/,
+                    uint64_t /*file_size*/) override {
+    ++total_entries_;
+    memtable_bytes_ += key.size();
+    memtable_bytes_ += value.size();
+    if (!has_last_ || key.compare(last_user_key_) != 0) {
+      ++unique_keys_;
+      last_user_key_.assign(key.data(), key.size());
+      has_last_ = true;
+    }
+    return Status::OK();
+  }
+
+  Status Finish(UserCollectedProperties* properties) override {
+    (*properties)[kFlushStatsTotalEntries] = std::to_string(total_entries_);
+    (*properties)[kFlushStatsUniqueKeys] = std::to_string(unique_keys_);
+    (*properties)[kFlushStatsMemtableBytes] = std::to_string(memtable_bytes_);
+    uint64_t level_u =
+        level_ < 0 ? std::numeric_limits<uint64_t>::max()
+                   : static_cast<uint64_t>(level_);
+    (*properties)[kFlushStatsLevel] = std::to_string(level_u);
+    return Status::OK();
+  }
+
+  UserCollectedProperties GetReadableProperties() const override {
+    UserCollectedProperties props;
+    props[kFlushStatsTotalEntries] = std::to_string(total_entries_);
+    props[kFlushStatsUniqueKeys] = std::to_string(unique_keys_);
+    props[kFlushStatsMemtableBytes] = std::to_string(memtable_bytes_);
+    uint64_t level_u =
+        level_ < 0 ? std::numeric_limits<uint64_t>::max()
+                   : static_cast<uint64_t>(level_);
+    props[kFlushStatsLevel] = std::to_string(level_u);
+    return props;
+  }
+
+  const char* Name() const override { return "FlushStatsCollector"; }
+
+ private:
+  const int level_;
+  uint64_t total_entries_;
+  uint64_t unique_keys_;
+  uint64_t memtable_bytes_;
+  std::string last_user_key_;
+  bool has_last_;
+};
+
+class FlushStatsCollectorFactory : public TablePropertiesCollectorFactory {
+ public:
+  TablePropertiesCollector* CreateTablePropertiesCollector(
+      TablePropertiesCollectorFactory::Context context) override {
+    return new FlushStatsCollector(context.level_at_creation);
+  }
+
+  const char* Name() const override { return "FlushStatsCollectorFactory"; }
+};
+
+class FlushStatsListener : public EventListener {
+ public:
+  FlushStatsListener(std::vector<FlushStatsRecord>* history,
+                     port::Mutex* history_mutex)
+      : history_(history), history_mutex_(history_mutex) {}
+
+  void OnFlushCompleted(DB* db, const FlushJobInfo& info) override {
+    FlushStatsRecord record;
+    record.cf_name = info.cf_name;
+    record.file_number = info.file_number;
+    record.total_entries = info.num_input_entries;
+    record.unique_keys = info.table_properties.num_entries;
+    record.memtable_bytes = info.memtable_payload_bytes;
+    if (record.total_entries == 0) {
+      record.total_entries = record.unique_keys;
+    }
+
+    if (db != nullptr) {
+      Status s = db->GetEnv()->GetFileSize(info.file_path, &record.output_bytes);
+      if (!s.ok()) {
+        record.output_bytes = 0;
+      }
+    }
+    if (record.output_bytes == 0) {
+      record.output_bytes = info.table_properties.data_size +
+                            info.table_properties.index_size +
+                            info.table_properties.filter_size;
+    }
+    record.level = 0;
+
+    MutexLock l(history_mutex_);
+    history_->push_back(record);
+  }
+
+  const char* Name() const override { return "FlushStatsListener"; }
+
+ private:
+  std::vector<FlushStatsRecord>* history_;
+  port::Mutex* history_mutex_;
 };
 
 // A class that reports stats to CSV file.
@@ -2914,6 +3049,12 @@ class Benchmark {
   bool use_blob_db_;    // Stacked BlobDB
   bool read_operands_;  // read via GetMergeOperands()
   std::vector<std::string> keys_;
+  bool flush_stats_enabled_ = false;
+  bool flush_stats_printed_ = false;
+  port::Mutex flush_stats_mutex_;
+  std::vector<FlushStatsRecord> flush_stats_;
+  std::shared_ptr<FlushStatsListener> flush_stats_listener_;
+  std::shared_ptr<FlushStatsCollectorFactory> flush_stats_collector_factory_;
 
   // Lee: tt record & parse func
   struct TwitterTraceRecord {
@@ -3655,10 +3796,23 @@ class Benchmark {
     exit(1);
   }
 
+  bool BenchmarkListContains(const std::string& target) const {
+    std::stringstream benchmark_stream(FLAGS_benchmarks);
+    std::string name;
+    while (std::getline(benchmark_stream, name, ',')) {
+      if (name == target) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   void Run() {
     if (!SanityCheck()) {
       ErrorExit();
     }
+    flush_stats_enabled_ =
+        FLAGS_flushstats || BenchmarkListContains("flushstats");
     Open(&open_options_);
     PrintHeader(open_options_);
     std::stringstream benchmark_stream(FLAGS_benchmarks);
@@ -3962,6 +4116,14 @@ class Benchmark {
       } else if (name == "stats") {
         PrintStats("rocksdb.stats");
         PrintStats("rocksdb.write-cache-wal-stats");
+      } else if (name == "flushstats") {
+        if (!flush_stats_enabled_) {
+          fprintf(stdout,
+                  "flushstats: skipped (enable with --flushstats=1)\n");
+        } else {
+          PrintFlushStats();
+          flush_stats_printed_ = true;
+        }
       } else if (name == "resetstats") {
         ResetStats();
       } else if (name == "verify") {
@@ -4168,6 +4330,11 @@ class Benchmark {
                 "Encountered an error ending the block cache tracing, %s\n",
                 s.ToString().c_str());
       }
+    }
+
+    if (flush_stats_enabled_ && FLAGS_flushstats && !flush_stats_printed_) {
+      PrintFlushStats();
+      flush_stats_printed_ = true;
     }
 
     if (FLAGS_statistics) {
@@ -4526,6 +4693,12 @@ class Benchmark {
     options.max_background_jobs = FLAGS_max_background_jobs;
     options.max_background_compactions = FLAGS_max_background_compactions;
     options.max_subcompactions = static_cast<uint32_t>(FLAGS_subcompactions);
+    if (FLAGS_compaction_logging && FLAGS_subcompactions > 1) {
+      fprintf(stderr,
+              "Warning: compaction logging does not support subcompactions "
+              "(--subcompactions=%" PRIu64 ").\n",
+              FLAGS_subcompactions);
+    }
     options.max_background_flushes = FLAGS_max_background_flushes;
     options.compaction_style = FLAGS_compaction_style_e;
     options.compaction_pri = FLAGS_compaction_pri_e;
@@ -5094,6 +5267,23 @@ class Benchmark {
             FLAGS_rate_limiter_auto_tuned,
             FLAGS_rate_limiter_single_burst_bytes));
       }
+    }
+
+    if (flush_stats_enabled_) {
+      if (!flush_stats_listener_) {
+        flush_stats_listener_ = std::make_shared<FlushStatsListener>(
+            &flush_stats_, &flush_stats_mutex_);
+      }
+      auto& listeners = options.listeners;
+      listeners.erase(
+          std::remove_if(listeners.begin(), listeners.end(),
+                         [](const std::shared_ptr<EventListener>& l) {
+                           return l &&
+                                  std::string(l->Name()) ==
+                                      "FlushStatsListener";
+                         }),
+          listeners.end());
+      listeners.push_back(flush_stats_listener_);
     }
 
     options.listeners.emplace_back(listener_);
@@ -7632,6 +7822,10 @@ class Benchmark {
   }
 
   void YCSBWorkloadW(ThreadState* thread) {
+    if(FLAGS_key_range == 0) {
+      fprintf(stderr, "key_range not set, using num as key_range\n");
+      FLAGS_key_range = FLAGS_num;
+    }
     ReadOptions options(FLAGS_verify_checksum, true);
     RandomGenerator gen;
     init_zipf_generator(0, FLAGS_key_range, bench_params.zipf_const);
@@ -9791,6 +9985,44 @@ class Benchmark {
         stats = "(failed)";
       }
       fprintf(stdout, "%s: %s\n", key.c_str(), stats.c_str());
+    }
+  }
+
+  void PrintFlushStats() {
+    std::vector<FlushStatsRecord> snapshot;
+    {
+      MutexLock l(&flush_stats_mutex_);
+      snapshot = flush_stats_;
+    }
+
+    fprintf(stdout, "\nFlush history\n");
+    fprintf(stdout,
+            "Level File# Memtable(Bytes) Output(Bytes) Garbage(%%) "
+            "Unique/Total CF\n");
+    if (snapshot.empty()) {
+      fprintf(stdout, "(empty)\n");
+      return;
+    }
+    for (const auto& record : snapshot) {
+      double garbage_pct = 0.0;
+      if (record.total_entries > 0) {
+        garbage_pct =
+            (static_cast<double>(record.total_entries - record.unique_keys) *
+             100.0) /
+            static_cast<double>(record.total_entries);
+      }
+      char level_buf[16];
+      if (record.level < 0) {
+        std::snprintf(level_buf, sizeof(level_buf), "?");
+      } else {
+        std::snprintf(level_buf, sizeof(level_buf), "%d", record.level);
+      }
+      fprintf(stdout,
+              "%5s %5" PRIu64 " %15" PRIu64 " %13" PRIu64 " %10.2f %7" PRIu64
+              "/%" PRIu64 " %s\n",
+              level_buf, record.file_number, record.memtable_bytes,
+              record.output_bytes, garbage_pct, record.unique_keys,
+              record.total_entries, record.cf_name.c_str());
     }
   }
 

@@ -182,6 +182,9 @@ class FlushJob {
   Statistics* stats_;
   EventLogger* event_logger_;
   TableProperties table_properties_;
+  uint64_t num_input_entries_ = 0;
+  uint64_t memtable_payload_bytes_ = 0;
+  uint64_t memtable_garbage_bytes_ = 0;
   bool measure_io_stats_;
   // True if this flush job should call fsync on the output directory. False
   // otherwise.

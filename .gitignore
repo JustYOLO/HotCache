@@ -7,6 +7,10 @@ coworkMotivation.sh
 *.bak
 /*.txt
 
+fillzip/
+prefix_dist_wc/
+wc_results/
+
 analyze_sst
 
 db_bench
@@ -16,6 +20,7 @@ data/
 results/mempurge/
 results/
 zipf/
+logs/
 
 *.a
 *.arc

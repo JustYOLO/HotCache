@@ -1154,6 +1154,9 @@ Status FlushJob::WriteLevel0Table() {
           event_logger_, job_context_->job_id, &table_properties_, write_hint,
           full_history_ts_low, blob_callback_, base_, &num_input_entries,
           &memtable_payload_bytes, &memtable_garbage_bytes, write_cache_);
+      num_input_entries_ = num_input_entries;
+      memtable_payload_bytes_ = memtable_payload_bytes;
+      memtable_garbage_bytes_ = memtable_garbage_bytes;
       TEST_SYNC_POINT_CALLBACK("FlushJob::WriteLevel0Table:s", &s);
       // TODO: Cleanup io_status in BuildTable and table builders
       assert(!s.ok() || io_s.ok());
@@ -1291,6 +1294,9 @@ std::unique_ptr<FlushJobInfo> FlushJob::GetFlushJobInfo() const {
   info->smallest_seqno = meta_.fd.smallest_seqno;
   info->largest_seqno = meta_.fd.largest_seqno;
   info->table_properties = table_properties_;
+  info->num_input_entries = num_input_entries_;
+  info->memtable_payload_bytes = memtable_payload_bytes_;
+  info->memtable_garbage_bytes = memtable_garbage_bytes_;
   info->flush_reason = flush_reason_;
   info->blob_compression_type = mutable_cf_options_.blob_compression_type;
 
