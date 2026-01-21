@@ -37,6 +37,8 @@ void CompactionJobStats::Reset() {
 
   total_input_raw_key_bytes = 0;
   total_input_raw_value_bytes = 0;
+  total_output_raw_key_bytes = 0;
+  total_output_raw_value_bytes = 0;
 
   num_input_deletion_records = 0;
   num_expired_deletion_records = 0;
@@ -82,6 +84,8 @@ void CompactionJobStats::Add(const CompactionJobStats& stats) {
 
   total_input_raw_key_bytes += stats.total_input_raw_key_bytes;
   total_input_raw_value_bytes += stats.total_input_raw_value_bytes;
+  total_output_raw_key_bytes += stats.total_output_raw_key_bytes;
+  total_output_raw_value_bytes += stats.total_output_raw_value_bytes;
 
   num_input_deletion_records += stats.num_input_deletion_records;
   num_expired_deletion_records += stats.num_expired_deletion_records;

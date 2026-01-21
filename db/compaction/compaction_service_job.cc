@@ -253,6 +253,10 @@ void CompactionServiceCompactionJob::UpdateCompactionJobStats(
   compaction_job_stats_->num_output_records = stats.num_output_records;
   compaction_job_stats_->num_output_files = stats.num_output_files;
   compaction_job_stats_->num_output_files_blob = stats.num_output_files_blob;
+  compaction_job_stats_->total_output_raw_key_bytes =
+      stats.output_raw_key_bytes;
+  compaction_job_stats_->total_output_raw_value_bytes =
+      stats.output_raw_value_bytes;
 }
 
 CompactionServiceCompactionJob::CompactionServiceCompactionJob(
@@ -634,6 +638,14 @@ static std::unordered_map<std::string, OptionTypeInfo>
           OptionTypeFlags::kNone}},
         {"total_input_raw_value_bytes",
          {offsetof(struct CompactionJobStats, total_input_raw_value_bytes),
+          OptionType::kUInt64T, OptionVerificationType::kNormal,
+          OptionTypeFlags::kNone}},
+        {"total_output_raw_key_bytes",
+         {offsetof(struct CompactionJobStats, total_output_raw_key_bytes),
+          OptionType::kUInt64T, OptionVerificationType::kNormal,
+          OptionTypeFlags::kNone}},
+        {"total_output_raw_value_bytes",
+         {offsetof(struct CompactionJobStats, total_output_raw_value_bytes),
           OptionType::kUInt64T, OptionVerificationType::kNormal,
           OptionTypeFlags::kNone}},
         {"num_input_deletion_records",

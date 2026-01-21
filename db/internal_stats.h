@@ -158,6 +158,8 @@ class InternalStats {
     uint64_t num_output_records = 0;
     uint64_t bytes_written = 0;
     uint64_t bytes_written_blob = 0;
+    uint64_t output_raw_key_bytes = 0;
+    uint64_t output_raw_value_bytes = 0;
     uint64_t num_output_files = 0;
     uint64_t num_output_files_blob = 0;
 
@@ -165,6 +167,8 @@ class InternalStats {
       this->num_output_records += stats.num_output_records;
       this->bytes_written += stats.bytes_written;
       this->bytes_written_blob += stats.bytes_written_blob;
+      this->output_raw_key_bytes += stats.output_raw_key_bytes;
+      this->output_raw_value_bytes += stats.output_raw_value_bytes;
       this->num_output_files += stats.num_output_files;
       this->num_output_files_blob += stats.num_output_files_blob;
     }
@@ -233,6 +237,10 @@ class InternalStats {
     // Total output entries from compaction
     uint64_t num_output_records;
 
+    // Raw output bytes (uncompressed, key/value sizes)
+    uint64_t output_raw_key_bytes;
+    uint64_t output_raw_value_bytes;
+
     // Number of compactions done
     int count;
 
@@ -259,6 +267,8 @@ class InternalStats {
           num_input_records(0),
           num_dropped_records(0),
           num_output_records(0),
+          output_raw_key_bytes(0),
+          output_raw_value_bytes(0),
           count(0) {
       int num_of_reasons = static_cast<int>(CompactionReason::kNumOfReasons);
       for (int i = 0; i < num_of_reasons; i++) {
@@ -286,6 +296,8 @@ class InternalStats {
           num_input_records(0),
           num_dropped_records(0),
           num_output_records(0),
+          output_raw_key_bytes(0),
+          output_raw_value_bytes(0),
           count(c) {
       int num_of_reasons = static_cast<int>(CompactionReason::kNumOfReasons);
       for (int i = 0; i < num_of_reasons; i++) {
@@ -322,6 +334,8 @@ class InternalStats {
           num_input_records(c.num_input_records),
           num_dropped_records(c.num_dropped_records),
           num_output_records(c.num_output_records),
+          output_raw_key_bytes(c.output_raw_key_bytes),
+          output_raw_value_bytes(c.output_raw_value_bytes),
           count(c.count) {
       int num_of_reasons = static_cast<int>(CompactionReason::kNumOfReasons);
       for (int i = 0; i < num_of_reasons; i++) {
@@ -352,6 +366,8 @@ class InternalStats {
       num_input_records = c.num_input_records;
       num_dropped_records = c.num_dropped_records;
       num_output_records = c.num_output_records;
+      output_raw_key_bytes = c.output_raw_key_bytes;
+      output_raw_value_bytes = c.output_raw_value_bytes;
       count = c.count;
 
       int num_of_reasons = static_cast<int>(CompactionReason::kNumOfReasons);
@@ -413,6 +429,8 @@ class InternalStats {
       this->num_input_records += c.num_input_records;
       this->num_dropped_records += c.num_dropped_records;
       this->num_output_records += c.num_output_records;
+      this->output_raw_key_bytes += c.output_raw_key_bytes;
+      this->output_raw_value_bytes += c.output_raw_value_bytes;
       this->count += c.count;
       int num_of_reasons = static_cast<int>(CompactionReason::kNumOfReasons);
       for (int i = 0; i < num_of_reasons; i++) {
@@ -425,6 +443,8 @@ class InternalStats {
       this->num_output_records += stats.num_output_records;
       this->bytes_written += stats.bytes_written;
       this->bytes_written_blob += stats.bytes_written_blob;
+      this->output_raw_key_bytes += stats.output_raw_key_bytes;
+      this->output_raw_value_bytes += stats.output_raw_value_bytes;
       this->num_output_files_blob +=
           static_cast<int>(stats.num_output_files_blob);
     }
@@ -454,6 +474,8 @@ class InternalStats {
       this->num_input_records -= c.num_input_records;
       this->num_dropped_records -= c.num_dropped_records;
       this->num_output_records -= c.num_output_records;
+      this->output_raw_key_bytes -= c.output_raw_key_bytes;
+      this->output_raw_value_bytes -= c.output_raw_value_bytes;
       this->count -= c.count;
       int num_of_reasons = static_cast<int>(CompactionReason::kNumOfReasons);
       for (int i = 0; i < num_of_reasons; i++) {

@@ -1002,6 +1002,24 @@ Status CompactionJob::Install(const MutableCFOptions& mutable_cf_options,
          << "num_subcompactions" << compact_->sub_compact_states.size()
          << "output_compression"
          << CompressionTypeToString(compact_->compaction->output_compression());
+  stream << "input_raw_key_bytes"
+         << compaction_job_stats_->total_input_raw_key_bytes
+         << "input_raw_value_bytes"
+         << compaction_job_stats_->total_input_raw_value_bytes
+         << "output_raw_key_bytes"
+         << compaction_job_stats_->total_output_raw_key_bytes
+         << "output_raw_value_bytes"
+         << compaction_job_stats_->total_output_raw_value_bytes;
+  uint64_t input_raw_total =
+      compaction_job_stats_->total_input_raw_key_bytes +
+      compaction_job_stats_->total_input_raw_value_bytes;
+  uint64_t output_raw_total =
+      compaction_job_stats_->total_output_raw_key_bytes +
+      compaction_job_stats_->total_output_raw_value_bytes;
+  uint64_t garbage_raw_total =
+      input_raw_total > output_raw_total ? input_raw_total - output_raw_total
+                                         : 0;
+  stream << "garbage_raw_bytes" << garbage_raw_total;
 
   stream << "num_single_delete_mismatches"
          << compaction_job_stats_->num_single_del_mismatch;
@@ -2135,6 +2153,16 @@ void CompactionJob::UpdateCompactionJobStats(
   compaction_job_stats_->num_output_records = stats.num_output_records;
   compaction_job_stats_->num_output_files = stats.num_output_files;
   compaction_job_stats_->num_output_files_blob = stats.num_output_files_blob;
+  uint64_t output_raw_key_bytes = stats.output_raw_key_bytes;
+  uint64_t output_raw_value_bytes = stats.output_raw_value_bytes;
+  if (compaction_stats_.has_penultimate_level_output) {
+    output_raw_key_bytes +=
+        compaction_stats_.penultimate_level_stats.output_raw_key_bytes;
+    output_raw_value_bytes +=
+        compaction_stats_.penultimate_level_stats.output_raw_value_bytes;
+  }
+  compaction_job_stats_->total_output_raw_key_bytes = output_raw_key_bytes;
+  compaction_job_stats_->total_output_raw_value_bytes = output_raw_value_bytes;
 
   if (stats.num_output_files > 0) {
     CopyPrefix(compact_->SmallestUserKey(),

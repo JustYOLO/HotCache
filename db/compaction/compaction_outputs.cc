@@ -413,6 +413,8 @@ Status CompactionOutputs::AddToOutput(
   builder_->Add(key, value);
 
   stats_.num_output_records++;
+  stats_.output_raw_key_bytes += key.size();
+  stats_.output_raw_value_bytes += value.size();
   current_output_file_size_ = builder_->EstimatedFileSize();
 
   if (blob_garbage_meter_) {

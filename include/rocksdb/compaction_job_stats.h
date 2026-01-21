@@ -77,6 +77,10 @@ struct CompactionJobStats {
   uint64_t total_input_raw_key_bytes = 0;
   // the sum of the uncompressed input values in bytes.
   uint64_t total_input_raw_value_bytes = 0;
+  // the sum of the uncompressed output keys in bytes.
+  uint64_t total_output_raw_key_bytes = 0;
+  // the sum of the uncompressed output values in bytes.
+  uint64_t total_output_raw_value_bytes = 0;
 
   // the number of deletion entries before compaction. Deletion entries
   // can disappear after compaction because they expired
