@@ -70,6 +70,7 @@ enum class LevelStatType {
   READ_GB,
   RN_GB,
   RNP1_GB,
+  WRITE_BYTES,
   WRITE_GB,
   W_NEW_GB,
   MOVED_GB,

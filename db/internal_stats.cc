@@ -44,6 +44,7 @@ const std::map<LevelStatType, LevelStat> InternalStats::compaction_level_stats =
         {LevelStatType::READ_GB, LevelStat{"ReadGB", "Read(GB)"}},
         {LevelStatType::RN_GB, LevelStat{"RnGB", "Rn(GB)"}},
         {LevelStatType::RNP1_GB, LevelStat{"Rnp1GB", "Rnp1(GB)"}},
+        {LevelStatType::WRITE_BYTES, LevelStat{"WriteBytes", "Write(B)"}},
         {LevelStatType::WRITE_GB, LevelStat{"WriteGB", "Write(GB)"}},
         {LevelStatType::W_NEW_GB, LevelStat{"WnewGB", "Wnew(GB)"}},
         {LevelStatType::MOVED_GB, LevelStat{"MovedGB", "Moved(GB)"}},
@@ -100,12 +101,13 @@ void PrintLevelStatsHeader(char* buf, size_t len, const std::string& cf_name,
   int line_size = snprintf(
       buf + written_size, len - written_size,
       "%s    %s   %s     %s %s  %s %s %s %s %s %s %s %s %s %s %s %s %s %s %s "
-      "%s\n",
+      "%s %s\n",
       // Note that we skip COMPACTED_FILES and merge it with Files column
       group_by.c_str(), hdr(LevelStatType::NUM_FILES),
       hdr(LevelStatType::SIZE_BYTES), hdr(LevelStatType::SCORE),
       hdr(LevelStatType::READ_GB), hdr(LevelStatType::RN_GB),
-      hdr(LevelStatType::RNP1_GB), hdr(LevelStatType::WRITE_GB),
+      hdr(LevelStatType::RNP1_GB), hdr(LevelStatType::WRITE_BYTES),
+      hdr(LevelStatType::WRITE_GB),
       hdr(LevelStatType::W_NEW_GB), hdr(LevelStatType::MOVED_GB),
       hdr(LevelStatType::WRITE_AMP), hdr(LevelStatType::READ_MBPS),
       hdr(LevelStatType::WRITE_MBPS), hdr(LevelStatType::COMP_SEC),
@@ -139,6 +141,8 @@ void PrepareLevelStats(std::map<LevelStatType, double>* level_stats,
   (*level_stats)[LevelStatType::RN_GB] =
       stats.bytes_read_non_output_levels / kGB;
   (*level_stats)[LevelStatType::RNP1_GB] = stats.bytes_read_output_level / kGB;
+  (*level_stats)[LevelStatType::WRITE_BYTES] =
+      static_cast<double>(stats.bytes_written);
   (*level_stats)[LevelStatType::WRITE_GB] = stats.bytes_written / kGB;
   (*level_stats)[LevelStatType::W_NEW_GB] = bytes_new / kGB;
   (*level_stats)[LevelStatType::MOVED_GB] = stats.bytes_moved / kGB;
@@ -169,6 +173,7 @@ void PrintLevelStats(char* buf, size_t len, const std::string& name,
       "%8.1f "    /*  Read(GB) */
       "%7.1f "    /*  Rn(GB) */
       "%8.1f "    /*  Rnp1(GB) */
+      "%12" PRIu64 " " /*  Write(B) */
       "%9.1f "    /*  Write(GB) */
       "%8.1f "    /*  Wnew(GB) */
       "%9.1f "    /*  Moved(GB) */
@@ -192,6 +197,7 @@ void PrintLevelStats(char* buf, size_t len, const std::string& name,
       stat_value.at(LevelStatType::READ_GB),
       stat_value.at(LevelStatType::RN_GB),
       stat_value.at(LevelStatType::RNP1_GB),
+      static_cast<uint64_t>(stat_value.at(LevelStatType::WRITE_BYTES)),
       stat_value.at(LevelStatType::WRITE_GB),
       stat_value.at(LevelStatType::W_NEW_GB),
       stat_value.at(LevelStatType::MOVED_GB),
@@ -2003,6 +2009,10 @@ void InternalStats::DumpCFStatsNoFileHistogram(bool is_periodic,
   snprintf(buf, sizeof(buf), "Flush(GB): cumulative %.3f, interval %.3f\n",
            flush_ingest / kGB, interval_flush_ingest / kGB);
   value->append(buf);
+  snprintf(buf, sizeof(buf),
+           "Flush(bytes): cumulative %" PRIu64 ", interval %" PRIu64 "\n",
+           flush_ingest, interval_flush_ingest);
+  value->append(buf);
   snprintf(buf, sizeof(buf), "AddFile(GB): cumulative %.3f, interval %.3f\n",
            add_file_ingest / kGB, interval_add_file_inget / kGB);
   value->append(buf);
@@ -2051,6 +2061,11 @@ void InternalStats::DumpCFStatsNoFileHistogram(bool is_periodic,
            compact_bytes_read / kMB / std::max(seconds_up, 0.001),
            compact_micros / kMicrosInSec);
   value->append(buf);
+  snprintf(buf, sizeof(buf),
+           "Cumulative compaction(bytes): write %" PRIu64
+           ", read %" PRIu64 "\n",
+           compact_bytes_write, compact_bytes_read);
+  value->append(buf);
 
   // Compaction interval
   uint64_t interval_compact_bytes_write =
@@ -2069,6 +2084,10 @@ void InternalStats::DumpCFStatsNoFileHistogram(bool is_periodic,
       interval_compact_bytes_read / kGB,
       interval_compact_bytes_read / kMB / std::max(interval_seconds_up, 0.001),
       interval_compact_micros / kMicrosInSec);
+  value->append(buf);
+  snprintf(buf, sizeof(buf),
+           "Interval compaction(bytes): write %" PRIu64 ", read %" PRIu64 "\n",
+           interval_compact_bytes_write, interval_compact_bytes_read);
   value->append(buf);
 
   snprintf(buf, sizeof(buf),

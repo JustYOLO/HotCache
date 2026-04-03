@@ -1647,6 +1647,8 @@ DEFINE_double(mix_put_ratio, 0.0,
               "The ratio of Put queries of mix_graph workload");
 DEFINE_double(mix_seek_ratio, 0.0,
               "The ratio of Seek queries of mix_graph workload");
+DEFINE_bool(mix_skip_reads, false,
+            "Skip Get/Seek queries in mix_graph (writes only).");
 DEFINE_int64(mix_max_scan_len, 10000, "The max scan length of Iterator");
 DEFINE_int64(mix_max_value_size, 1024, "The max value size of this workload");
 DEFINE_uint64(put_limit, 0,
@@ -1895,6 +1897,8 @@ DEFINE_uint64(
     twitter_queue_bytes, 256ULL * 1024 * 1024,
     "Maximum bytes of Twitter trace text buffered between reader and replayer. "
     "0 means unbounded.");
+DEFINE_bool(twittertrace_skip_reads, false,
+            "Skip Get ops in twittertrace (writes only).");
 
 DEFINE_string(
     twitter_offset_file, "",
@@ -2971,45 +2975,50 @@ class Duration {
 
 class SstArchiverListener : public rocksdb::EventListener {
  public:
+  void OnFlushCompleted(rocksdb::DB* /*db*/,
+                        const rocksdb::FlushJobInfo& fi) override {
+    if (fi.file_path.empty()) {
+      return;
+    }
+    ArchiveFile(fi.file_path, /*level=*/0);
+  }
+
   void OnCompactionCompleted(rocksdb::DB* /*db*/,
                              const rocksdb::CompactionJobInfo& ci) override {
+    if (!ci.status.ok()) {
+      return;
+    }
+    if (ci.output_files.empty() || ci.output_file_infos.empty()) {
+      return;
+    }
+    for (size_t i = 0; i < ci.output_files.size(); i++) {
+      ArchiveFile(ci.output_files[i], ci.output_file_infos[i].level);
+    }
+  }
 
-    // Use input_file_infos (which contains level info) instead of inputs
-    if (ci.input_file_infos.empty()) return;
-
-    // Base Directory: {DB_PATH}/sst_archive
+ private:
+  void ArchiveFile(const std::string& src_path, int level) {
+    if (src_path.empty()) {
+      return;
+    }
     std::string base_dir = FLAGS_db + "/sst_archive";
-
     if (mkdir(base_dir.c_str(), 0777) != 0) {
     }
 
-    // Iterate through all input files using the index
-    for (size_t i = 0; i < ci.input_file_infos.size(); i++) {
-      // 1. Get the level for this specific file
-      int level = ci.input_file_infos[i].level;
+    std::string level_dir = base_dir + "/Level_" + std::to_string(level);
+    if (mkdir(level_dir.c_str(), 0777) != 0) {
+    }
 
-      // 2. Get the full source path (safest to take from input_files vector)
-      std::string src_path = ci.input_files[i];
+    size_t last_slash = src_path.find_last_of('/');
+    std::string filename = (last_slash == std::string::npos)
+                               ? src_path
+                               : src_path.substr(last_slash + 1);
+    std::string dest_path = level_dir + "/" + filename;
 
-      // 3. Create Target Directory: sst_archive/Level_X
-      std::string level_dir = base_dir + "/Level_" + std::to_string(level);
-      if (mkdir(level_dir.c_str(), 0777) != 0) {
-      }
-
-      // 4. Extract filename
-      size_t last_slash = src_path.find_last_of('/');
-      std::string filename = (last_slash == std::string::npos)
-                                 ? src_path
-                                 : src_path.substr(last_slash + 1);
-
-      std::string dest_path = level_dir + "/" + filename;
-
-      // 5. Create Hard Link
-      if (access(dest_path.c_str(), F_OK) == -1) {
-        if (link(src_path.c_str(), dest_path.c_str()) != 0) {
-          fprintf(stderr, "Failed to link %s -> %s (Error: %s)\n",
-                  filename.c_str(), dest_path.c_str(), strerror(errno));
-        }
+    if (access(dest_path.c_str(), F_OK) == -1) {
+      if (link(src_path.c_str(), dest_path.c_str()) != 0) {
+        fprintf(stderr, "Failed to link %s -> %s (Error: %s)\n",
+                filename.c_str(), dest_path.c_str(), strerror(errno));
       }
     }
   }
@@ -7136,6 +7145,10 @@ class Benchmark {
       GenerateKeyFromInt(key_rand, FLAGS_num, &key);
       int query_type = query.GetType(rand_v);
 
+      if (FLAGS_mix_skip_reads && query_type != 1) {
+        continue;
+      }
+
       // change the qps
       uint64_t now = FLAGS_env->NowMicros();
       uint64_t usecs_since_last;
@@ -7843,8 +7856,7 @@ class Benchmark {
 
     std::string value;
     int64_t writes_done = 0;
-    int64_t nums = FLAGS_num;
-    Duration duration(FLAGS_duration, 0);
+    Duration duration(FLAGS_duration, FLAGS_num);
 
     std::unique_ptr<const char[]> key_guard;
     Slice key = AllocateKey(&key_guard);
@@ -7856,8 +7868,7 @@ class Benchmark {
     }
 
     // 전체 작업은 쓰기 작업만 수행
-    while (nums > 0) {
-      nums--;
+    while (!duration.Done(1)) {
       DB* db = SelectDB(thread);
 
       long k;
@@ -8127,6 +8138,9 @@ class Benchmark {
       Slice key(rec.key);
 
       if (rec.op == "get" || rec.op == "gets") {
+        if (FLAGS_twittertrace_skip_reads) {
+          continue;
+        }
         chunk_gets++;
         std::string val;
         s = db->Get(read_opts, key, &val);
