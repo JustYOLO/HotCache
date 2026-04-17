@@ -38,11 +38,15 @@ struct ImmutableCFOptions {
 
   std::shared_ptr<CompactionFilterFactory> compaction_filter_factory;
 
-  int min_write_buffer_number_to_merge;
-
   int max_write_buffer_number_to_maintain;
 
   int64_t max_write_buffer_size_to_maintain;
+
+  bool enable_dynamic_min_write_buffer_number_to_merge;
+
+  double dynamic_min_write_buffer_number_to_merge_garbage_ratio;
+
+  int max_dynamic_min_write_buffer_number_to_merge;
 
   bool inplace_update_support;
 
@@ -106,6 +110,8 @@ struct MutableCFOptions {
   explicit MutableCFOptions(const ColumnFamilyOptions& options)
       : write_buffer_size(options.write_buffer_size),
         max_write_buffer_number(options.max_write_buffer_number),
+        min_write_buffer_number_to_merge(
+            options.min_write_buffer_number_to_merge),
         arena_block_size(options.arena_block_size),
         memtable_prefix_bloom_size_ratio(
             options.memtable_prefix_bloom_size_ratio),
@@ -180,6 +186,7 @@ struct MutableCFOptions {
   MutableCFOptions()
       : write_buffer_size(0),
         max_write_buffer_number(0),
+        min_write_buffer_number_to_merge(0),
         arena_block_size(0),
         memtable_prefix_bloom_size_ratio(0),
         memtable_whole_key_filtering(false),
@@ -252,6 +259,7 @@ struct MutableCFOptions {
   // Memtable related options
   size_t write_buffer_size;
   int max_write_buffer_number;
+  int min_write_buffer_number_to_merge;
   size_t arena_block_size;
   double memtable_prefix_bloom_size_ratio;
   bool memtable_whole_key_filtering;

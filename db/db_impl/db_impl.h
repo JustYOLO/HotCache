@@ -1509,6 +1509,9 @@ class DBImpl : public DB {
                                    const Status& st,
                                    const CompactionJobStats& job_stats,
                                    int job_id);
+  void MaybeUpdateDynamicMinWriteBufferNumberToMerge(
+      ColumnFamilyData* cfd, Compaction* c, const Status& st,
+      const CompactionJobStats& job_stats, int job_id);
   void NotifyOnMemTableSealed(ColumnFamilyData* cfd,
                               const MemTableInfo& mem_table_info);
 

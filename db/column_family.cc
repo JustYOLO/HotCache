@@ -239,6 +239,28 @@ ColumnFamilyOptions SanitizeOptions(const ImmutableDBOptions& db_options,
 
     result.min_write_buffer_number_to_merge = 1;
   }
+  result.max_dynamic_min_write_buffer_number_to_merge =
+      std::min(result.max_dynamic_min_write_buffer_number_to_merge,
+               result.max_write_buffer_number - 1);
+  if (result.max_dynamic_min_write_buffer_number_to_merge < 1) {
+    result.max_dynamic_min_write_buffer_number_to_merge = 1;
+  }
+  if (result.dynamic_min_write_buffer_number_to_merge_garbage_ratio < 0) {
+    result.dynamic_min_write_buffer_number_to_merge_garbage_ratio = 0;
+  } else if (result.dynamic_min_write_buffer_number_to_merge_garbage_ratio >
+             1) {
+    result.dynamic_min_write_buffer_number_to_merge_garbage_ratio = 1;
+  }
+  if (db_options.atomic_flush &&
+      result.enable_dynamic_min_write_buffer_number_to_merge &&
+      result.max_dynamic_min_write_buffer_number_to_merge > 1) {
+    ROCKS_LOG_WARN(
+        db_options.logger,
+        "Dynamic min_write_buffer_number_to_merge is not compatible with "
+        "atomic_flush when the configured high-state value is greater than 1. "
+        "Sanitizing max_dynamic_min_write_buffer_number_to_merge to 1.");
+    result.max_dynamic_min_write_buffer_number_to_merge = 1;
+  }
 
   if (result.num_levels < 1) {
     result.num_levels = 1;
@@ -547,7 +569,7 @@ ColumnFamilyData::ColumnFamilyData(
           cf_options.table_factory->IsDeleteRangeSupported()),
       write_buffer_manager_(write_buffer_manager),
       mem_(nullptr),
-      imm_(ioptions_.min_write_buffer_number_to_merge,
+      imm_(initial_cf_options_.min_write_buffer_number_to_merge,
            ioptions_.max_write_buffer_number_to_maintain,
            ioptions_.max_write_buffer_size_to_maintain),
       super_version_(nullptr),
@@ -923,7 +945,7 @@ ColumnFamilyData::GetWriteStallConditionAndCause(
     int num_unflushed_memtables, int num_l0_files,
     uint64_t num_compaction_needed_bytes,
     const MutableCFOptions& mutable_cf_options,
-    const ImmutableCFOptions& immutable_cf_options) {
+    const ImmutableCFOptions& /*immutable_cf_options*/) {
   if (num_unflushed_memtables >= mutable_cf_options.max_write_buffer_number) {
     return {WriteStallCondition::kStopped, WriteStallCause::kMemtableLimit};
   } else if (!mutable_cf_options.disable_auto_compactions &&
@@ -939,7 +961,7 @@ ColumnFamilyData::GetWriteStallConditionAndCause(
              num_unflushed_memtables >=
                  mutable_cf_options.max_write_buffer_number - 1 &&
              num_unflushed_memtables - 1 >=
-                 immutable_cf_options.min_write_buffer_number_to_merge) {
+                 mutable_cf_options.min_write_buffer_number_to_merge) {
     return {WriteStallCondition::kDelayed, WriteStallCause::kMemtableLimit};
   } else if (!mutable_cf_options.disable_auto_compactions &&
              mutable_cf_options.level0_slowdown_writes_trigger >= 0 &&
@@ -1348,6 +1370,8 @@ void ColumnFamilyData::InstallSuperVersion(
     SuperVersionContext* sv_context,
     const MutableCFOptions& mutable_cf_options) {
   SuperVersion* new_superversion = sv_context->new_superversion.release();
+  imm_.SetMinWriteBufferNumberToMerge(
+      mutable_cf_options.min_write_buffer_number_to_merge);
   new_superversion->mutable_cf_options = mutable_cf_options;
   new_superversion->Init(this, mem_, imm_.current(), current_,
                          sv_context->new_seqno_to_time_mapping
@@ -1572,6 +1596,15 @@ Status ColumnFamilyData::SetOptions(
     s = ValidateOptions(db_opts, cf_opts);
   }
   if (s.ok()) {
+    cf_opts.min_write_buffer_number_to_merge =
+        std::min(cf_opts.min_write_buffer_number_to_merge,
+                 cf_opts.max_write_buffer_number - 1);
+    if (cf_opts.min_write_buffer_number_to_merge < 1) {
+      cf_opts.min_write_buffer_number_to_merge = 1;
+    }
+    if (db_opts.atomic_flush) {
+      cf_opts.min_write_buffer_number_to_merge = 1;
+    }
     mutable_cf_options_ = MutableCFOptions(cf_opts);
     mutable_cf_options_.RefreshDerivedOptions(ioptions_);
   }

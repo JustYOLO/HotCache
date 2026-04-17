@@ -927,6 +927,71 @@ void DBImpl::NotifyOnFlushBegin(ColumnFamilyData* cfd, FileMetaData* file_meta,
   // flush process.
 }
 
+void DBImpl::MaybeUpdateDynamicMinWriteBufferNumberToMerge(
+    ColumnFamilyData* cfd, Compaction* c, const Status& st,
+    const CompactionJobStats& compaction_job_stats, int job_id) {
+  mutex_.AssertHeld();
+  if (!st.ok() || cfd == nullptr || c == nullptr || cfd->IsDropped()) {
+    return;
+  }
+
+  const auto* ioptions = cfd->ioptions();
+  if (!ioptions->enable_dynamic_min_write_buffer_number_to_merge) {
+    return;
+  }
+  if (c->start_level() != 0) {
+    return;
+  }
+
+  const uint64_t input_raw_total =
+      compaction_job_stats.total_input_raw_key_bytes +
+      compaction_job_stats.total_input_raw_value_bytes;
+  if (input_raw_total == 0) {
+    return;
+  }
+
+  const uint64_t output_raw_total =
+      compaction_job_stats.total_output_raw_key_bytes +
+      compaction_job_stats.total_output_raw_value_bytes;
+  const uint64_t garbage_raw_total =
+      input_raw_total > output_raw_total ? input_raw_total - output_raw_total
+                                         : 0;
+  const double garbage_ratio =
+      static_cast<double>(garbage_raw_total) / input_raw_total;
+  MutableCFOptions new_options = *cfd->GetLatestMutableCFOptions();
+  const int high_state_min_write_buffer_number_to_merge = std::max(
+      1, std::min(ioptions->max_dynamic_min_write_buffer_number_to_merge,
+                  new_options.max_write_buffer_number - 1));
+  const int desired_min_write_buffer_number_to_merge =
+      garbage_ratio >
+              ioptions
+                  ->dynamic_min_write_buffer_number_to_merge_garbage_ratio
+          ? high_state_min_write_buffer_number_to_merge
+          : 1;
+  if (new_options.min_write_buffer_number_to_merge ==
+      desired_min_write_buffer_number_to_merge) {
+    return;
+  }
+
+  const int old_min_write_buffer_number_to_merge =
+      new_options.min_write_buffer_number_to_merge;
+  new_options.min_write_buffer_number_to_merge =
+      desired_min_write_buffer_number_to_merge;
+  cfd->SetMutableCFOptions(new_options);
+
+  SuperVersionContext sv_context(true /* create_superversion */);
+  InstallSuperVersionAndScheduleWork(cfd, &sv_context, new_options);
+  sv_context.Clean();
+
+  ROCKS_LOG_INFO(
+      immutable_db_options_.info_log,
+      "[%s] job %d dynamic min_write_buffer_number_to_merge: %d -> %d "
+      "(garbage ratio %.6f, threshold %.6f)",
+      cfd->GetName().c_str(), job_id, old_min_write_buffer_number_to_merge,
+      desired_min_write_buffer_number_to_merge, garbage_ratio,
+      ioptions->dynamic_min_write_buffer_number_to_merge_garbage_ratio);
+}
+
 void DBImpl::NotifyOnFlushCompleted(
     ColumnFamilyData* cfd, const MutableCFOptions& mutable_cf_options,
     std::list<std::unique_ptr<FlushJobInfo>>* flush_jobs_info) {
@@ -1689,9 +1754,6 @@ void DBImpl::NotifyOnCompactionBegin(ColumnFamilyData* cfd, Compaction* c,
                                      const Status& st,
                                      const CompactionJobStats& job_stats,
                                      int job_id) {
-  if (immutable_db_options_.listeners.empty()) {
-    return;
-  }
   mutex_.AssertHeld();
   if (shutting_down_.load(std::memory_order_acquire)) {
     return;
@@ -1701,7 +1763,13 @@ void DBImpl::NotifyOnCompactionBegin(ColumnFamilyData* cfd, Compaction* c,
     return;
   }
 
-  c->SetNotifyOnCompactionCompleted();
+  if (cfd->ioptions()->enable_dynamic_min_write_buffer_number_to_merge ||
+      !immutable_db_options_.listeners.empty()) {
+    c->SetNotifyOnCompactionCompleted();
+  }
+  if (immutable_db_options_.listeners.empty()) {
+    return;
+  }
   // release lock while notifying events
   mutex_.Unlock();
   TEST_SYNC_POINT("DBImpl::NotifyOnCompactionBegin::UnlockMutex");
@@ -1719,9 +1787,6 @@ void DBImpl::NotifyOnCompactionBegin(ColumnFamilyData* cfd, Compaction* c,
 void DBImpl::NotifyOnCompactionCompleted(
     ColumnFamilyData* cfd, Compaction* c, const Status& st,
     const CompactionJobStats& compaction_job_stats, const int job_id) {
-  if (immutable_db_options_.listeners.size() == 0U) {
-    return;
-  }
   mutex_.AssertHeld();
   if (shutting_down_.load(std::memory_order_acquire)) {
     return;
@@ -1731,17 +1796,21 @@ void DBImpl::NotifyOnCompactionCompleted(
     return;
   }
 
-  // release lock while notifying events
-  mutex_.Unlock();
-  TEST_SYNC_POINT("DBImpl::NotifyOnCompactionCompleted::UnlockMutex");
-  {
-    CompactionJobInfo info{};
-    BuildCompactionJobInfo(cfd, c, st, compaction_job_stats, job_id, &info);
-    for (const auto& listener : immutable_db_options_.listeners) {
-      listener->OnCompactionCompleted(this, info);
+  if (!immutable_db_options_.listeners.empty()) {
+    // release lock while notifying events
+    mutex_.Unlock();
+    TEST_SYNC_POINT("DBImpl::NotifyOnCompactionCompleted::UnlockMutex");
+    {
+      CompactionJobInfo info{};
+      BuildCompactionJobInfo(cfd, c, st, compaction_job_stats, job_id, &info);
+      for (const auto& listener : immutable_db_options_.listeners) {
+        listener->OnCompactionCompleted(this, info);
+      }
     }
+    mutex_.Lock();
   }
-  mutex_.Lock();
+  MaybeUpdateDynamicMinWriteBufferNumberToMerge(cfd, c, st,
+                                                compaction_job_stats, job_id);
   // no need to signal bg_cv_ as it will be signaled at the end of the
   // flush process.
 }
@@ -2685,7 +2754,7 @@ Status DBImpl::WaitUntilFlushWouldNotStallWrites(ColumnFamilyData* cfd,
       // triggers are so low that stalling is needed for any background work. In
       // that case we shouldn't wait since background work won't be scheduled.
       if (cfd->imm()->NumNotFlushed() <
-              cfd->ioptions()->min_write_buffer_number_to_merge &&
+              mutable_cf_options.min_write_buffer_number_to_merge &&
           vstorage->l0_delay_trigger_count() <
               mutable_cf_options.level0_file_num_compaction_trigger) {
         break;

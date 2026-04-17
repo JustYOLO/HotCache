@@ -348,6 +348,21 @@ TEST_F(DBOptionsTest, SetWithCustomMemTableFactory) {
   }
 }
 
+TEST_F(DBOptionsTest, SetMinWriteBufferNumberToMergeDynamically) {
+  Options options = CurrentOptions();
+  options.max_write_buffer_number = 4;
+  Reopen(options);
+
+  ColumnFamilyHandle* cfh = dbfull()->DefaultColumnFamily();
+  ASSERT_OK(dbfull()->SetOptions(
+      cfh, {{"min_write_buffer_number_to_merge", "2"}}));
+
+  MutableCFOptions mutable_cf_options;
+  ASSERT_OK(dbfull()->TEST_GetLatestMutableCFOptions(cfh, &mutable_cf_options));
+  ASSERT_EQ(2, mutable_cf_options.min_write_buffer_number_to_merge);
+  ASSERT_EQ(2, dbfull()->GetOptions(cfh).min_write_buffer_number_to_merge);
+}
+
 TEST_F(DBOptionsTest, SetBytesPerSync) {
   const size_t kValueSize = 1024 * 1024;  // 1MB
   Options options;

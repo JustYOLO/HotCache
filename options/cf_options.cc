@@ -430,6 +430,10 @@ static std::unordered_map<std::string, OptionTypeInfo>
          {offsetof(struct MutableCFOptions, max_write_buffer_number),
           OptionType::kInt, OptionVerificationType::kNormal,
           OptionTypeFlags::kMutable}},
+        {"min_write_buffer_number_to_merge",
+         {offsetof(struct MutableCFOptions, min_write_buffer_number_to_merge),
+          OptionType::kInt, OptionVerificationType::kNormal,
+          OptionTypeFlags::kMutable}},
         {"source_compaction_factor",
          {0, OptionType::kInt, OptionVerificationType::kDeprecated,
           OptionTypeFlags::kMutable}},
@@ -744,6 +748,21 @@ static std::unordered_map<std::string, OptionTypeInfo>
         {"max_mem_compaction_level",
          {0, OptionType::kInt, OptionVerificationType::kDeprecated,
           OptionTypeFlags::kNone}},
+        {"enable_dynamic_min_write_buffer_number_to_merge",
+         {offsetof(struct ImmutableCFOptions,
+                   enable_dynamic_min_write_buffer_number_to_merge),
+          OptionType::kBoolean, OptionVerificationType::kNormal,
+          OptionTypeFlags::kNone}},
+        {"dynamic_min_write_buffer_number_to_merge_garbage_ratio",
+         {offsetof(struct ImmutableCFOptions,
+                   dynamic_min_write_buffer_number_to_merge_garbage_ratio),
+          OptionType::kDouble, OptionVerificationType::kNormal,
+          OptionTypeFlags::kNone}},
+        {"max_dynamic_min_write_buffer_number_to_merge",
+         {offsetof(struct ImmutableCFOptions,
+                   max_dynamic_min_write_buffer_number_to_merge),
+          OptionType::kInt, OptionVerificationType::kNormal,
+          OptionTypeFlags::kNone, nullptr}},
         {"max_write_buffer_number_to_maintain",
          {offsetof(struct ImmutableCFOptions,
                    max_write_buffer_number_to_maintain),
@@ -754,10 +773,6 @@ static std::unordered_map<std::string, OptionTypeInfo>
                    max_write_buffer_size_to_maintain),
           OptionType::kInt64T, OptionVerificationType::kNormal,
           OptionTypeFlags::kNone}},
-        {"min_write_buffer_number_to_merge",
-         {offsetof(struct ImmutableCFOptions, min_write_buffer_number_to_merge),
-          OptionType::kInt, OptionVerificationType::kNormal,
-          OptionTypeFlags::kNone, nullptr}},
         {"num_levels",
          {offsetof(struct ImmutableCFOptions, num_levels), OptionType::kInt,
           OptionVerificationType::kNormal, OptionTypeFlags::kNone}},
@@ -981,12 +996,16 @@ ImmutableCFOptions::ImmutableCFOptions(const ColumnFamilyOptions& cf_options)
       merge_operator(cf_options.merge_operator),
       compaction_filter(cf_options.compaction_filter),
       compaction_filter_factory(cf_options.compaction_filter_factory),
-      min_write_buffer_number_to_merge(
-          cf_options.min_write_buffer_number_to_merge),
       max_write_buffer_number_to_maintain(
           cf_options.max_write_buffer_number_to_maintain),
       max_write_buffer_size_to_maintain(
           cf_options.max_write_buffer_size_to_maintain),
+      enable_dynamic_min_write_buffer_number_to_merge(
+          cf_options.enable_dynamic_min_write_buffer_number_to_merge),
+      dynamic_min_write_buffer_number_to_merge_garbage_ratio(
+          cf_options.dynamic_min_write_buffer_number_to_merge_garbage_ratio),
+      max_dynamic_min_write_buffer_number_to_merge(
+          cf_options.max_dynamic_min_write_buffer_number_to_merge),
       inplace_update_support(cf_options.inplace_update_support),
       inplace_callback(cf_options.inplace_callback),
       memtable_factory(cf_options.memtable_factory),
@@ -1092,6 +1111,8 @@ void MutableCFOptions::Dump(Logger* log) const {
                  write_buffer_size);
   ROCKS_LOG_INFO(log, "                  max_write_buffer_number: %d",
                  max_write_buffer_number);
+  ROCKS_LOG_INFO(log, "         min_write_buffer_number_to_merge: %d",
+                 min_write_buffer_number_to_merge);
   ROCKS_LOG_INFO(log,
                  "                         arena_block_size: %" ROCKSDB_PRIszt,
                  arena_block_size);

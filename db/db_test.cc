@@ -5873,6 +5873,49 @@ TEST_F(DBTest, DynamicMiscOptions) {
   ASSERT_TRUE(mutable_cf_options.report_bg_io_stats);
 }
 
+TEST_F(DBTest, DynamicMinWriteBufferNumberToMergeFollowsGarbageRatio) {
+  Options options = CurrentOptions();
+  options.disable_auto_compactions = true;
+  options.write_buffer_size = 4096;
+  options.max_write_buffer_number = 4;
+  options.min_write_buffer_number_to_merge = 1;
+  options.enable_dynamic_min_write_buffer_number_to_merge = true;
+  options.dynamic_min_write_buffer_number_to_merge_garbage_ratio = 0.16;
+  options.max_dynamic_min_write_buffer_number_to_merge = 3;
+  DestroyAndReopen(options);
+
+  ASSERT_OK(Put("000001", "value_a"));
+  ASSERT_OK(Put("000002", "value_a"));
+  ASSERT_OK(Flush());
+  ASSERT_OK(Put("000001", "value_b"));
+  ASSERT_OK(Put("000002", "value_b"));
+  ASSERT_OK(Flush());
+  Slice high_begin("000000");
+  Slice high_end("000003");
+  ASSERT_OK(db_->CompactRange(CompactRangeOptions(), &high_begin, &high_end));
+
+  MutableCFOptions mutable_cf_options;
+  ASSERT_OK(dbfull()->TEST_GetLatestMutableCFOptions(
+      dbfull()->DefaultColumnFamily(),
+                                                     &mutable_cf_options));
+  ASSERT_EQ(3, mutable_cf_options.min_write_buffer_number_to_merge);
+
+  ASSERT_OK(Put("100001", "value_c"));
+  ASSERT_OK(Put("100004", "value_c"));
+  ASSERT_OK(Flush());
+  ASSERT_OK(Put("100002", "value_d"));
+  ASSERT_OK(Put("100003", "value_d"));
+  ASSERT_OK(Flush());
+  Slice low_begin("100000");
+  Slice low_end("100005");
+  ASSERT_OK(db_->CompactRange(CompactRangeOptions(), &low_begin, &low_end));
+
+  ASSERT_OK(dbfull()->TEST_GetLatestMutableCFOptions(
+      dbfull()->DefaultColumnFamily(),
+                                                     &mutable_cf_options));
+  ASSERT_EQ(1, mutable_cf_options.min_write_buffer_number_to_merge);
+}
+
 TEST_F(DBTest, L0L1L2AndUpHitCounter) {
   const int kNumLevels = 3;
   const int kNumKeysPerLevel = 10000;

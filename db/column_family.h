@@ -369,6 +369,9 @@ class ColumnFamilyData {
   Status SetOptions(
       const DBOptions& db_options,
       const std::unordered_map<std::string, std::string>& options_map);
+  void SetMutableCFOptions(const MutableCFOptions& mutable_cf_options) {
+    mutable_cf_options_ = mutable_cf_options;
+  }
 
   InternalStats* internal_stats() { return internal_stats_.get(); }
 

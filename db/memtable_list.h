@@ -285,6 +285,9 @@ class MemTableList {
   // flushing.
   bool IsFlushPendingOrRunning() const;
 
+  // DB mutex held or write thread.
+  void SetMinWriteBufferNumberToMerge(int min_write_buffer_number_to_merge);
+
   // Returns the earliest memtables that needs to be flushed. The returned
   // memtables are guaranteed to be in the ascending order of created time.
   void PickMemtablesToFlush(uint64_t max_memtable_id,
@@ -499,7 +502,7 @@ class MemTableList {
                                      autovector<ReadOnlyMemTable*>* to_delete,
                                      InstrumentedMutex* mu);
 
-  const int min_write_buffer_number_to_merge_;
+  int min_write_buffer_number_to_merge_;
 
   MemTableListVersion* current_;
 

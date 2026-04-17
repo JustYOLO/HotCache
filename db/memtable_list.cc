@@ -401,6 +401,16 @@ bool MemTableList::IsFlushPendingOrRunning() const {
   return IsFlushPending();
 }
 
+void MemTableList::SetMinWriteBufferNumberToMerge(
+    int min_write_buffer_number_to_merge) {
+  assert(min_write_buffer_number_to_merge >= 1);
+  min_write_buffer_number_to_merge_ = min_write_buffer_number_to_merge;
+  const bool flush_pending =
+      (flush_requested_ && num_flush_not_started_ > 0) ||
+      (num_flush_not_started_ >= min_write_buffer_number_to_merge_);
+  imm_flush_needed.store(flush_pending, std::memory_order_release);
+}
+
 // Returns the memtables that need to be flushed.
 void MemTableList::PickMemtablesToFlush(uint64_t max_memtable_id,
                                         autovector<ReadOnlyMemTable*>* ret,

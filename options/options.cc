@@ -43,6 +43,12 @@ AdvancedColumnFamilyOptions::AdvancedColumnFamilyOptions(const Options& options)
     : max_write_buffer_number(options.max_write_buffer_number),
       min_write_buffer_number_to_merge(
           options.min_write_buffer_number_to_merge),
+      enable_dynamic_min_write_buffer_number_to_merge(
+          options.enable_dynamic_min_write_buffer_number_to_merge),
+      dynamic_min_write_buffer_number_to_merge_garbage_ratio(
+          options.dynamic_min_write_buffer_number_to_merge_garbage_ratio),
+      max_dynamic_min_write_buffer_number_to_merge(
+          options.max_dynamic_min_write_buffer_number_to_merge),
       max_write_buffer_number_to_maintain(
           options.max_write_buffer_number_to_maintain),
       max_write_buffer_size_to_maintain(

@@ -507,6 +507,23 @@ DEFINE_int32(min_write_buffer_number_to_merge,
              " writing less data to storage if there are duplicate records "
              " in each of these individual write buffers.");
 
+DEFINE_bool(enable_dynamic_min_write_buffer_number_to_merge,
+            ROCKSDB_NAMESPACE::Options()
+                .enable_dynamic_min_write_buffer_number_to_merge,
+            "Enable bang-bang control of min_write_buffer_number_to_merge "
+            "based on the garbage ratio reported by completed compactions.");
+
+DEFINE_double(dynamic_min_write_buffer_number_to_merge_garbage_ratio,
+              ROCKSDB_NAMESPACE::Options()
+                  .dynamic_min_write_buffer_number_to_merge_garbage_ratio,
+              "Garbage ratio threshold for the dynamic "
+              "min_write_buffer_number_to_merge controller.");
+
+DEFINE_int32(max_dynamic_min_write_buffer_number_to_merge,
+             ROCKSDB_NAMESPACE::Options()
+                 .max_dynamic_min_write_buffer_number_to_merge,
+             "High-state value for dynamic min_write_buffer_number_to_merge.");
+
 DEFINE_int32(max_write_buffer_number_to_maintain,
              ROCKSDB_NAMESPACE::Options().max_write_buffer_number_to_maintain,
              "The total maximum number of write buffers to maintain in memory "
@@ -4702,6 +4719,12 @@ class Benchmark {
     options.max_write_buffer_number = FLAGS_max_write_buffer_number;
     options.min_write_buffer_number_to_merge =
         FLAGS_min_write_buffer_number_to_merge;
+    options.enable_dynamic_min_write_buffer_number_to_merge =
+        FLAGS_enable_dynamic_min_write_buffer_number_to_merge;
+    options.dynamic_min_write_buffer_number_to_merge_garbage_ratio =
+        FLAGS_dynamic_min_write_buffer_number_to_merge_garbage_ratio;
+    options.max_dynamic_min_write_buffer_number_to_merge =
+        FLAGS_max_dynamic_min_write_buffer_number_to_merge;
     options.max_write_buffer_number_to_maintain =
         FLAGS_max_write_buffer_number_to_maintain;
     options.max_write_buffer_size_to_maintain =

@@ -162,7 +162,30 @@ struct AdvancedColumnFamilyOptions {
   // If atomic flush is enabled (options.atomic_flush == true), then this
   // option will be sanitized to 1.
   // Default: 1
+  //
+  // Dynamically changeable through SetOptions() API
   int min_write_buffer_number_to_merge = 1;
+
+  // Enable bang-bang control of min_write_buffer_number_to_merge based on
+  // compaction garbage ratio. When enabled, RocksDB will set
+  // min_write_buffer_number_to_merge to 1 when the latest compaction's garbage
+  // ratio is below dynamic_min_write_buffer_number_to_merge_garbage_ratio, and
+  // to max_dynamic_min_write_buffer_number_to_merge when it is above.
+  // Garbage ratio is computed as:
+  //   garbage_raw_bytes / (input_raw_key_bytes + input_raw_value_bytes)
+  // Default: false
+  bool enable_dynamic_min_write_buffer_number_to_merge = false;
+
+  // Garbage ratio threshold used by the dynamic
+  // min_write_buffer_number_to_merge controller.
+  // Default: 0.0
+  double dynamic_min_write_buffer_number_to_merge_garbage_ratio = 0.0;
+
+  // High-state value used by the dynamic
+  // min_write_buffer_number_to_merge controller when the garbage ratio is
+  // above dynamic_min_write_buffer_number_to_merge_garbage_ratio.
+  // Default: 1
+  int max_dynamic_min_write_buffer_number_to_merge = 1;
 
   // DEPRECATED
   // The total maximum number of write buffers to maintain in memory including

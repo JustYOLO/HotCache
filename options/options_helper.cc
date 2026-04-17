@@ -286,6 +286,8 @@ void UpdateColumnFamilyOptions(const MutableCFOptions& moptions,
   cf_opts->prepopulate_blob_cache = moptions.prepopulate_blob_cache;
 
   // Misc options
+  cf_opts->min_write_buffer_number_to_merge =
+      moptions.min_write_buffer_number_to_merge;
   cf_opts->max_sequential_skip_in_iterations =
       moptions.max_sequential_skip_in_iterations;
   cf_opts->paranoid_file_checks = moptions.paranoid_file_checks;
@@ -310,12 +312,16 @@ void UpdateColumnFamilyOptions(const ImmutableCFOptions& ioptions,
   cf_opts->merge_operator = ioptions.merge_operator;
   cf_opts->compaction_filter = ioptions.compaction_filter;
   cf_opts->compaction_filter_factory = ioptions.compaction_filter_factory;
-  cf_opts->min_write_buffer_number_to_merge =
-      ioptions.min_write_buffer_number_to_merge;
   cf_opts->max_write_buffer_number_to_maintain =
       ioptions.max_write_buffer_number_to_maintain;
   cf_opts->max_write_buffer_size_to_maintain =
       ioptions.max_write_buffer_size_to_maintain;
+  cf_opts->enable_dynamic_min_write_buffer_number_to_merge =
+      ioptions.enable_dynamic_min_write_buffer_number_to_merge;
+  cf_opts->dynamic_min_write_buffer_number_to_merge_garbage_ratio =
+      ioptions.dynamic_min_write_buffer_number_to_merge_garbage_ratio;
+  cf_opts->max_dynamic_min_write_buffer_number_to_merge =
+      ioptions.max_dynamic_min_write_buffer_number_to_merge;
   cf_opts->inplace_update_support = ioptions.inplace_update_support;
   cf_opts->inplace_callback = ioptions.inplace_callback;
   cf_opts->memtable_factory = ioptions.memtable_factory;
